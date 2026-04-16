@@ -4,7 +4,7 @@ High-performance FastAPI backend for categories, tasks, and subtasks.
 
 ## Performance defaults
 
-- Async FastAPI + async SQLAlchemy (`aiosqlite` by default).
+- Async FastAPI + async SQLAlchemy (`aiosqlite` for local dev, `asyncpg` for Postgres/Supabase).
 - SQLite WAL mode + tuned PRAGMAs for better read/write concurrency.
 - Indexed columns for common filters (`category_id`, `completed`, `priority`, `created_at`).
 - Pagination on task listing endpoints.
@@ -22,6 +22,20 @@ uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
 ```
 
 Open API docs: `http://localhost:8000/docs`
+
+## Deploy (Render + Supabase)
+
+1. Create a Supabase project and copy its connection string.
+2. In Render, create a new Web Service from this repository (`backend`).
+3. Build command: `pip install -r requirements.txt`
+4. Start command: `uvicorn app.main:app --host 0.0.0.0 --port $PORT`
+5. Set environment variables in Render:
+   - `DATABASE_URL` = your Supabase Postgres URL (`postgresql://...?...sslmode=require`)
+   - `ALLOWED_ORIGINS` = your Vercel frontend URL (comma-separated if multiple)
+   - `DEBUG=false`
+   - Optional: `APP_NAME`, `DEFAULT_PAGE_SIZE`, `MAX_PAGE_SIZE`
+
+You can also use `render.yaml` in this folder for Blueprint deploy.
 
 ## API overview
 
