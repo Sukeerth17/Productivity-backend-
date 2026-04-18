@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import AsyncGenerator
+from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 from sqlalchemy import event, text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
@@ -11,13 +12,22 @@ from .config import settings
 def _normalize_database_url(database_url: str) -> str:
     # Supabase/Render often expose postgres:// or postgresql:// DSNs.
     # SQLAlchemy async engine needs postgresql+asyncpg:// for async driver support.
-    if database_url.startswith("postgresql+asyncpg://"):
-        return database_url
-    if database_url.startswith("postgres://"):
-        return database_url.replace("postgres://", "postgresql+asyncpg://", 1)
-    if database_url.startswith("postgresql://"):
-        return database_url.replace("postgresql://", "postgresql+asyncpg://", 1)
-    return database_url
+    normalized = database_url
+    if normalized.startswith("postgres://"):
+        normalized = normalized.replace("postgres://", "postgresql+asyncpg://", 1)
+    elif normalized.startswith("postgresql://"):
+        normalized = normalized.replace("postgresql://", "postgresql+asyncpg://", 1)
+
+    # asyncpg expects `ssl`, while many providers expose `sslmode`.
+    if normalized.startswith("postgresql+asyncpg://"):
+        parts = urlsplit(normalized)
+        query = dict(parse_qsl(parts.query, keep_blank_values=True))
+        sslmode = query.pop("sslmode", None)
+        if sslmode and "ssl" not in query:
+            query["ssl"] = sslmode
+        normalized = urlunsplit((parts.scheme, parts.netloc, parts.path, urlencode(query), parts.fragment))
+
+    return normalized
 
 
 database_url = _normalize_database_url(settings.database_url)
