@@ -5,16 +5,15 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
+from .bootstrap import prepare_database
 from .config import settings
 from .database import check_db_health, engine
-from .models import Base
 from .routers import auth, categories, stats, tasks
 
 
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
-    async with engine.begin() as conn:
-        await conn.run_sync(Base.metadata.create_all)
+    await prepare_database(engine)
     yield
 
 

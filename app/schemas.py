@@ -123,6 +123,15 @@ class CategoryCompletionStats(BaseModel):
     completion_rate: float
 
 
+class HistorySummary(BaseModel):
+    started_at: datetime
+    since_start_total_tasks: int
+    since_start_completed_tasks: int
+    completion_rate: float
+    current_streak: int
+    total_momentum: int
+
+
 class SignUpRequest(BaseModel):
     name: str = Field(min_length=2, max_length=120)
     email: EmailStr
@@ -132,6 +141,10 @@ class SignUpRequest(BaseModel):
 class LoginRequest(BaseModel):
     email: EmailStr
     password: str = Field(min_length=8, max_length=128)
+
+
+class UserUpdate(BaseModel):
+    name: str = Field(min_length=2, max_length=120)
 
 
 class UserOut(BaseModel):
