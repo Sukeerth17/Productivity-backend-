@@ -114,6 +114,15 @@ class DashboardStats(BaseModel):
     completion_rate: float
 
 
+class CategoryCompletionStats(BaseModel):
+    category_id: str
+    category_name: str
+    color: str
+    total_tasks: int
+    completed_tasks: int
+    completion_rate: float
+
+
 class SignUpRequest(BaseModel):
     name: str = Field(min_length=2, max_length=120)
     email: EmailStr

@@ -1,8 +1,8 @@
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
-from sqlalchemy import Select, func, select
+from sqlalchemy import Select, and_, case, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
@@ -188,6 +188,51 @@ async def dashboard_stats(session: AsyncSession) -> dict[str, float | int]:
         "categories": categories,
         "completion_rate": round((completed / total * 100) if total else 0.0, 2),
     }
+
+
+async def category_completion_stats(session: AsyncSession, days: int = 30) -> list[dict[str, str | int | float]]:
+    cutoff = datetime.now(timezone.utc) - timedelta(days=days)
+
+    completed_case = func.coalesce(func.sum(case((Task.completed.is_(True), 1), else_=0)), 0)
+    stmt = (
+        select(
+            Category.id.label("category_id"),
+            Category.name.label("category_name"),
+            Category.color.label("color"),
+            func.count(Task.id).label("total_tasks"),
+            completed_case.label("completed_tasks"),
+        )
+        .outerjoin(
+            Task,
+            and_(
+                Task.category_id == Category.id,
+                Task.created_at >= cutoff,
+            ),
+        )
+        .group_by(Category.id, Category.name, Category.color)
+        .order_by(Category.created_at.desc())
+    )
+
+    result = await session.execute(stmt)
+    rows = result.mappings().all()
+
+    stats: list[dict[str, str | int | float]] = []
+    for row in rows:
+        total_tasks = int(row["total_tasks"] or 0)
+        completed_tasks = int(row["completed_tasks"] or 0)
+        completion_rate = round((completed_tasks / total_tasks * 100) if total_tasks else 0.0, 2)
+        stats.append(
+            {
+                "category_id": str(row["category_id"]),
+                "category_name": str(row["category_name"]),
+                "color": str(row["color"]),
+                "total_tasks": total_tasks,
+                "completed_tasks": completed_tasks,
+                "completion_rate": completion_rate,
+            }
+        )
+
+    return stats
 
 
 async def sign_up(session: AsyncSession, payload: SignUpRequest) -> User:
