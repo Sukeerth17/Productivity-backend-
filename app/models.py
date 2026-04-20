@@ -135,9 +135,6 @@ class SubTask(Base):
 
 class ProductivityStats(Base):
     __tablename__ = "productivity_stats"
-    __table_args__ = (
-        Index("ix_productivity_stats_user_id", "user_id"),
-    )
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=lambda: str(uuid4()))
     user_id: Mapped[str] = mapped_column(
