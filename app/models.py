@@ -35,6 +35,12 @@ class User(Base):
         cascade="all, delete-orphan",
         passive_deletes=True,
     )
+    productivity_stats: Mapped[ProductivityStats | None] = relationship(
+        back_populates="user",
+        cascade="all, delete-orphan",
+        passive_deletes=True,
+        uselist=False,
+    )
 
 
 class Category(Base):
@@ -125,3 +131,44 @@ class SubTask(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now_utc)
 
     task: Mapped[Task] = relationship(back_populates="subtasks")
+
+
+class ProductivityStats(Base):
+    __tablename__ = "productivity_stats"
+    __table_args__ = (
+        Index("ix_productivity_stats_user_id", "user_id"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=lambda: str(uuid4()))
+    user_id: Mapped[str] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"),
+        index=True,
+    )
+    
+    # All-time stats
+    alltime_total_tasks: Mapped[int] = mapped_column(Integer, default=0)
+    alltime_completed_tasks: Mapped[int] = mapped_column(Integer, default=0)
+    alltime_completion_rate: Mapped[float] = mapped_column(default=0.0)
+    
+    # Month stats
+    month_total_tasks: Mapped[int] = mapped_column(Integer, default=0)
+    month_completed_tasks: Mapped[int] = mapped_column(Integer, default=0)
+    month_completion_rate: Mapped[float] = mapped_column(default=0.0)
+    
+    # Week stats
+    week_total_tasks: Mapped[int] = mapped_column(Integer, default=0)
+    week_completed_tasks: Mapped[int] = mapped_column(Integer, default=0)
+    week_completion_rate: Mapped[float] = mapped_column(default=0.0)
+    
+    # Day stats
+    day_total_tasks: Mapped[int] = mapped_column(Integer, default=0)
+    day_completed_tasks: Mapped[int] = mapped_column(Integer, default=0)
+    day_completion_rate: Mapped[float] = mapped_column(default=0.0)
+    
+    # Category breakdown for all-time
+    category_breakdown: Mapped[str | None] = mapped_column(Text, nullable=True)  # JSON string
+    
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now_utc, onupdate=now_utc)
+    
+    user: Mapped[User] = relationship(back_populates="productivity_stats")
+

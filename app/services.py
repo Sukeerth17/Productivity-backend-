@@ -1,13 +1,15 @@
 from __future__ import annotations
 
 from datetime import date, datetime, timedelta, timezone
+import json
 
 from sqlalchemy import Select, and_, case, func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
-from .models import Category, SubTask, Task, User
+from .models import Category, SubTask, Task, User, ProductivityStats
 from .schemas import (
+    CategoryBreakdownItem,
     CategoryCreate,
     CategoryUpdate,
     LoginRequest,
@@ -17,6 +19,7 @@ from .schemas import (
     TaskCreate,
     TaskUpdate,
     UserUpdate,
+    ProductivityStatsOut,
 )
 from .security import generate_token, hash_password, verify_password
 
@@ -116,6 +119,8 @@ async def create_task(session: AsyncSession, user: User, payload: TaskCreate) ->
 
     session.add(task)
     await session.commit()
+    # Recalculate productivity stats
+    await calculate_and_store_productivity_stats(session, user)
     return await get_task_or_none(session, user, task.id, with_subtasks=True)
 
 
@@ -226,6 +231,8 @@ async def toggle_task_completion(session: AsyncSession, user: User, task: Task) 
     task.completed = not task.completed
     task.completed_at = datetime.now(timezone.utc) if task.completed else None
     await session.commit()
+    # Recalculate productivity stats
+    await calculate_and_store_productivity_stats(session, user)
     return await get_task_or_none(session, user, task.id, with_subtasks=True)
 
 
@@ -382,3 +389,184 @@ async def login(session: AsyncSession, payload: LoginRequest) -> User:
     await _claim_orphaned_data_for_single_user(session, user)
     await session.refresh(user)
     return user
+
+
+async def _calculate_stats_for_period(
+    session: AsyncSession,
+    user: User,
+    start_date: datetime,
+    end_date: datetime | None = None,
+) -> tuple[int, int, float]:
+    """Calculate total, completed, and completion rate for a given time period."""
+    filters = [
+        Task.user_id == user.id,
+        Task.created_at >= start_date,
+    ]
+    if end_date:
+        filters.append(Task.created_at < end_date)
+    
+    total_q = await session.execute(select(func.count(Task.id)).where(*filters))
+    completed_q = await session.execute(
+        select(func.count(Task.id)).where(*filters, Task.completed.is_(True))
+    )
+    
+    total = int(total_q.scalar_one())
+    completed = int(completed_q.scalar_one())
+    completion_rate = round((completed / total * 100) if total else 0.0, 2)
+    
+    return total, completed, completion_rate
+
+
+async def _get_category_breakdown(session: AsyncSession, user: User) -> list[CategoryBreakdownItem]:
+    """Get category breakdown for all-time stats."""
+    completed_case = func.coalesce(func.sum(case((Task.completed.is_(True), 1), else_=0)), 0)
+    stmt = (
+        select(
+            Category.id.label("category_id"),
+            Category.name.label("category_name"),
+            Category.color.label("color"),
+            func.count(Task.id).label("total_tasks"),
+            completed_case.label("completed_tasks"),
+        )
+        .where(Category.user_id == user.id)
+        .outerjoin(
+            Task,
+            and_(
+                Task.category_id == Category.id,
+                Task.user_id == user.id,
+            ),
+        )
+        .group_by(Category.id, Category.name, Category.color)
+        .order_by(Category.created_at.desc())
+    )
+
+    result = await session.execute(stmt)
+    rows = result.mappings().all()
+
+    breakdown = []
+    for row in rows:
+        total_tasks = int(row["total_tasks"] or 0)
+        completed_tasks = int(row["completed_tasks"] or 0)
+        completion_rate = round((completed_tasks / total_tasks * 100) if total_tasks else 0.0, 2)
+        breakdown.append(
+            CategoryBreakdownItem(
+                category_id=str(row["category_id"]),
+                category_name=str(row["category_name"]),
+                color=str(row["color"]),
+                total_tasks=total_tasks,
+                completed_tasks=completed_tasks,
+                completion_rate=completion_rate,
+            )
+        )
+    
+    return breakdown
+
+
+async def calculate_and_store_productivity_stats(
+    session: AsyncSession,
+    user: User,
+) -> ProductivityStats:
+    """Calculate productivity stats and store/overwrite in database."""
+    now = datetime.now(timezone.utc)
+    today_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+    week_start = today_start - timedelta(days=now.weekday())
+    month_start = today_start.replace(day=1)
+    
+    # Calculate stats for each period
+    alltime_total, alltime_completed, alltime_rate = await _calculate_stats_for_period(
+        session, user, user.created_at
+    )
+    
+    day_total, day_completed, day_rate = await _calculate_stats_for_period(
+        session, user, today_start
+    )
+    
+    week_total, week_completed, week_rate = await _calculate_stats_for_period(
+        session, user, week_start
+    )
+    
+    month_total, month_completed, month_rate = await _calculate_stats_for_period(
+        session, user, month_start
+    )
+    
+    # Get category breakdown
+    category_breakdown = await _get_category_breakdown(session, user)
+    category_breakdown_json = json.dumps([item.model_dump() for item in category_breakdown])
+    
+    # Check if stats already exist for this user
+    existing_stats = await session.execute(
+        select(ProductivityStats).where(ProductivityStats.user_id == user.id)
+    )
+    stats = existing_stats.scalar_one_or_none()
+    
+    if stats:
+        # Update existing stats (overwrite)
+        stats.alltime_total_tasks = alltime_total
+        stats.alltime_completed_tasks = alltime_completed
+        stats.alltime_completion_rate = alltime_rate
+        stats.day_total_tasks = day_total
+        stats.day_completed_tasks = day_completed
+        stats.day_completion_rate = day_rate
+        stats.week_total_tasks = week_total
+        stats.week_completed_tasks = week_completed
+        stats.week_completion_rate = week_rate
+        stats.month_total_tasks = month_total
+        stats.month_completed_tasks = month_completed
+        stats.month_completion_rate = month_rate
+        stats.category_breakdown = category_breakdown_json
+        stats.updated_at = now
+    else:
+        # Create new stats
+        stats = ProductivityStats(
+            user_id=user.id,
+            alltime_total_tasks=alltime_total,
+            alltime_completed_tasks=alltime_completed,
+            alltime_completion_rate=alltime_rate,
+            day_total_tasks=day_total,
+            day_completed_tasks=day_completed,
+            day_completion_rate=day_rate,
+            week_total_tasks=week_total,
+            week_completed_tasks=week_completed,
+            week_completion_rate=week_rate,
+            month_total_tasks=month_total,
+            month_completed_tasks=month_completed,
+            month_completion_rate=month_rate,
+            category_breakdown=category_breakdown_json,
+        )
+        session.add(stats)
+    
+    await session.commit()
+    await session.refresh(stats)
+    return stats
+
+
+async def get_productivity_stats(session: AsyncSession, user: User) -> ProductivityStatsOut:
+    """Get stored productivity stats."""
+    # First calculate and store/update stats
+    stats = await calculate_and_store_productivity_stats(session, user)
+    
+    # Parse category breakdown
+    category_breakdown = None
+    if stats.category_breakdown:
+        try:
+            breakdown_data = json.loads(stats.category_breakdown)
+            category_breakdown = [CategoryBreakdownItem(**item) for item in breakdown_data]
+        except (json.JSONDecodeError, TypeError):
+            category_breakdown = None
+    
+    return ProductivityStatsOut(
+        alltime_total_tasks=stats.alltime_total_tasks,
+        alltime_completed_tasks=stats.alltime_completed_tasks,
+        alltime_completion_rate=stats.alltime_completion_rate,
+        day_total_tasks=stats.day_total_tasks,
+        day_completed_tasks=stats.day_completed_tasks,
+        day_completion_rate=stats.day_completion_rate,
+        week_total_tasks=stats.week_total_tasks,
+        week_completed_tasks=stats.week_completed_tasks,
+        week_completion_rate=stats.week_completion_rate,
+        month_total_tasks=stats.month_total_tasks,
+        month_completed_tasks=stats.month_completed_tasks,
+        month_completion_rate=stats.month_completion_rate,
+        category_breakdown=category_breakdown,
+        updated_at=stats.updated_at,
+    )

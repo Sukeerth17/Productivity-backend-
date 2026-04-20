@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Literal
+from typing import Literal, Any
 
 from pydantic import BaseModel, ConfigDict, EmailStr, Field, field_validator
 
@@ -159,3 +159,42 @@ class UserOut(BaseModel):
 class AuthResponse(BaseModel):
     token: str
     user: UserOut
+
+
+class CategoryBreakdownItem(BaseModel):
+    category_id: str
+    category_name: str
+    color: str
+    total_tasks: int
+    completed_tasks: int
+    completion_rate: float
+
+
+class ProductivityStatsOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    
+    # All-time stats
+    alltime_total_tasks: int
+    alltime_completed_tasks: int
+    alltime_completion_rate: float
+    
+    # Month stats
+    month_total_tasks: int
+    month_completed_tasks: int
+    month_completion_rate: float
+    
+    # Week stats
+    week_total_tasks: int
+    week_completed_tasks: int
+    week_completion_rate: float
+    
+    # Day stats
+    day_total_tasks: int
+    day_completed_tasks: int
+    day_completion_rate: float
+    
+    # Category breakdown for all-time
+    category_breakdown: list[CategoryBreakdownItem] | None = None
+    
+    updated_at: datetime
+

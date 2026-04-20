@@ -6,8 +6,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from ..database import get_session
 from ..dependencies import get_current_user
 from ..models import User
-from ..schemas import CategoryCompletionStats, DashboardStats, HistorySummary
-from ..services import category_completion_stats, dashboard_stats, history_summary
+from ..schemas import CategoryCompletionStats, DashboardStats, HistorySummary, ProductivityStatsOut
+from ..services import category_completion_stats, dashboard_stats, history_summary, get_productivity_stats
 
 router = APIRouter(prefix="/stats", tags=["stats"])
 
@@ -35,3 +35,11 @@ async def get_category_completion(
     current_user: User = Depends(get_current_user),
 ):
     return await category_completion_stats(session, current_user, days=days)
+
+
+@router.get("/productivity", response_model=ProductivityStatsOut)
+async def get_productivity(
+    session: AsyncSession = Depends(get_session),
+    current_user: User = Depends(get_current_user),
+):
+    return await get_productivity_stats(session, current_user)
