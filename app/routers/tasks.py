@@ -37,12 +37,13 @@ async def get_tasks(
     category_id: str | None = None,
     completed: bool | None = None,
     priority: str | None = Query(default=None, pattern="^(low|medium|high)$"),
+    search: str | None = Query(default=None),
     limit: int = Query(default=settings.default_page_size, ge=1, le=settings.max_page_size),
     offset: int = Query(default=0, ge=0),
     session: AsyncSession = Depends(get_session),
     current_user: User = Depends(get_current_user),
 ):
-    tasks, total = await list_tasks(session, current_user, category_id, completed, priority, limit, offset)
+    tasks, total = await list_tasks(session, current_user, category_id, completed, priority, search, limit, offset)
     return {"items": tasks, "total": total, "limit": limit, "offset": offset}
 
 

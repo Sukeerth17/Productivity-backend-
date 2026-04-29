@@ -42,3 +42,17 @@ async def patch_me(
     current_user: User = Depends(get_current_user),
 ):
     return await update_user_profile(session, current_user, payload)
+
+
+@router.post("/reset-password")
+async def reset_password(payload: LoginRequest, session: AsyncSession = Depends(get_session)):
+    from sqlalchemy import select
+    from ..security import hash_password
+    stmt = select(User).where(User.email == payload.email)
+    result = await session.execute(stmt)
+    user = result.scalar_one_or_none()
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+    user.password_hash = hash_password(payload.password)
+    await session.commit()
+    return {"message": "Password updated"}

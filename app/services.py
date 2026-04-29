@@ -157,6 +157,7 @@ async def list_tasks(
     category_id: str | None,
     completed: bool | None,
     priority: str | None,
+    search: str | None,
     limit: int,
     offset: int,
 ) -> tuple[list[Task], int]:
@@ -167,6 +168,8 @@ async def list_tasks(
         filters.append(Task.completed == completed)
     if priority:
         filters.append(Task.priority == priority)
+    if search:
+        filters.append(Task.title.ilike(f"%{search.strip()}%"))
 
     base_query = select(Task).where(*filters)
     total_query = select(func.count(Task.id)).where(*filters)
