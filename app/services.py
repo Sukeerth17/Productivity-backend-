@@ -134,7 +134,7 @@ async def create_task(session: AsyncSession, user: User, payload: TaskCreate) ->
     session.add(task)
     await session.commit()
     # Adjust persistent ledger totals
-    await adjust_stats(session, user.id, total_delta=1, completed_delta=1 if payload.completed else 0)
+    await adjust_stats(session, user.id, category_id=category.id, total_delta=1, completed_delta=1 if payload.completed else 0)
     return await get_task_or_none(session, user, task.id, with_subtasks=True)
 
 
@@ -200,7 +200,7 @@ async def update_task(session: AsyncSession, user: User, task: Task, payload: Ta
         new_completed = data["completed"]
         if new_completed != old_completed:
             completed_delta = 1 if new_completed else -1
-            await adjust_stats(session, user.id, completed_delta=completed_delta)
+            await adjust_stats(session, user.id, category_id=task.category_id, completed_delta=completed_delta)
         
         if new_completed and not old_completed:
             task.completed_at = datetime.now(timezone.utc)
@@ -257,7 +257,7 @@ async def toggle_task_completion(session: AsyncSession, user: User, task: Task) 
     await session.commit()
     # Adjust persistent ledger totals
     completed_delta = 1 if task.completed else -1
-    await adjust_stats(session, user.id, completed_delta=completed_delta)
+    await adjust_stats(session, user.id, category_id=task.category_id, completed_delta=completed_delta)
     return await get_task_or_none(session, user, task.id, with_subtasks=True)
 
 
@@ -572,6 +572,7 @@ async def calculate_and_store_productivity_stats(
 async def adjust_stats(
     session: AsyncSession,
     user_id: str,
+    category_id: str | None = None,
     total_delta: int = 0,
     completed_delta: int = 0,
 ) -> None:
@@ -598,6 +599,43 @@ async def adjust_stats(
     stats.month_completion_rate = round((stats.month_completed_tasks / stats.month_total_tasks * 100) if stats.month_total_tasks else 0.0, 2)
     stats.week_completion_rate = round((stats.week_completed_tasks / stats.week_total_tasks * 100) if stats.week_total_tasks else 0.0, 2)
     stats.day_completion_rate = round((stats.day_completed_tasks / stats.day_total_tasks * 100) if stats.day_total_tasks else 0.0, 2)
+
+    # Category breakdown updates
+    if category_id:
+        cat_res = await session.execute(select(Category).where(Category.id == category_id))
+        category = cat_res.scalar_one_or_none()
+        
+        if category:
+            breakdown = []
+            if stats.category_breakdown:
+                try:
+                    breakdown = json.loads(stats.category_breakdown)
+                except:
+                    breakdown = []
+                    
+            found = False
+            for item in breakdown:
+                if item["category_id"] == category_id:
+                    item["total_tasks"] = max(0, item.get("total_tasks", 0) + total_delta)
+                    item["completed_tasks"] = max(0, item.get("completed_tasks", 0) + completed_delta)
+                    item["completion_rate"] = round((item["completed_tasks"] / item["total_tasks"] * 100) if item["total_tasks"] else 0.0, 2)
+                    item["color"] = category.color
+                    item["category_name"] = category.name
+                    found = True
+                    break
+                    
+            if not found:
+                rate = 100.0 if completed_delta > 0 else 0.0
+                breakdown.append({
+                    "category_id": category_id,
+                    "category_name": category.name,
+                    "color": category.color,
+                    "total_tasks": max(0, total_delta),
+                    "completed_tasks": max(0, completed_delta),
+                    "completion_rate": rate
+                })
+                
+            stats.category_breakdown = json.dumps(breakdown)
     
     await session.commit()
 
