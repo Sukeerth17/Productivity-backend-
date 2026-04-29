@@ -650,12 +650,59 @@ async def get_productivity_stats(session: AsyncSession, user: User) -> Productiv
         await session.commit()
         await session.refresh(stats)
     
+    # Reset boundaries if needed
+    now = datetime.now(timezone.utc)
+    changed = False
+    
+    if stats.updated_at:
+        updated_utc = stats.updated_at
+        if updated_utc.tzinfo is None:
+            updated_utc = updated_utc.replace(tzinfo=timezone.utc)
+            
+        # Day boundary reset
+        if updated_utc.date() < now.date():
+            stats.day_total_tasks = 0
+            stats.day_completed_tasks = 0
+            stats.day_completion_rate = 0.0
+            changed = True
+            
+        # Week boundary reset
+        if updated_utc.isocalendar()[1] != now.isocalendar()[1] or updated_utc.year != now.year:
+            stats.week_total_tasks = 0
+            stats.week_completed_tasks = 0
+            stats.week_completion_rate = 0.0
+            changed = True
+            
+        # Month boundary reset
+        if updated_utc.month != now.month or updated_utc.year != now.year:
+            stats.month_total_tasks = 0
+            stats.month_completed_tasks = 0
+            stats.month_completion_rate = 0.0
+            changed = True
+            
+    if changed:
+        await session.commit()
+        await session.refresh(stats)
+
     # Parse category breakdown
     category_breakdown = None
     if stats.category_breakdown:
         try:
             breakdown_data = json.loads(stats.category_breakdown)
+            
+            # Re-sync category names & colors
+            for item in breakdown_data:
+                cat_id = item.get("category_id")
+                if cat_id:
+                    cat_res = await session.execute(select(Category).where(Category.id == cat_id))
+                    category = cat_res.scalar_one_or_none()
+                    if category:
+                        item["category_name"] = category.name
+                        item["color"] = category.color
+                        
             category_breakdown = [CategoryBreakdownItem(**item) for item in breakdown_data]
+            stats.category_breakdown = json.dumps(breakdown_data)
+            await session.commit()
         except (json.JSONDecodeError, TypeError):
             category_breakdown = None
     
