@@ -54,7 +54,7 @@ class SubTaskOut(BaseModel):
 
 class TaskCreate(BaseModel):
     title: str = Field(min_length=1, max_length=240)
-    category_id: str
+    category_id: str | None = None
     notes: str | None = None
     completed: bool = False
     is_habit: bool = False
@@ -144,7 +144,8 @@ class LoginRequest(BaseModel):
 
 
 class UserUpdate(BaseModel):
-    name: str = Field(min_length=2, max_length=120)
+    name: str | None = Field(default=None, min_length=2, max_length=120)
+    password: str | None = Field(default=None, min_length=8, max_length=128)
 
 
 class UserOut(BaseModel):

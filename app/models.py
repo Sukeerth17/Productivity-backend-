@@ -41,6 +41,11 @@ class User(Base):
         passive_deletes=True,
         uselist=False,
     )
+    task_completions: Mapped[list[TaskCompletion]] = relationship(
+        back_populates="user",
+        cascade="all, delete-orphan",
+        passive_deletes=True,
+    )
 
 
 class Category(Base):
@@ -111,6 +116,11 @@ class Task(Base):
         order_by="SubTask.position",
         lazy="selectin",
     )
+    completions: Mapped[list[TaskCompletion]] = relationship(
+        back_populates="task",
+        cascade="all, delete-orphan",
+        passive_deletes=True,
+    )
 
 
 class SubTask(Base):
@@ -169,3 +179,26 @@ class ProductivityStats(Base):
     
     user: Mapped[User] = relationship(back_populates="productivity_stats")
 
+
+class TaskCompletion(Base):
+    """Track each task completion for accurate statistics across habit resets."""
+    __tablename__ = "task_completions"
+    __table_args__ = (
+        Index("ix_task_completions_user_completed_at", "user_id", "completed_at"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=lambda: str(uuid4()))
+    user_id: Mapped[str] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"),
+        index=True,
+    )
+    task_id: Mapped[str] = mapped_column(
+        ForeignKey("tasks.id", ondelete="CASCADE"),
+        index=True,
+    )
+    task_title: Mapped[str] = mapped_column(String(240))  # Store title for history after task deletion
+    is_habit: Mapped[bool] = mapped_column(Boolean, default=False)
+    completed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+    
+    user: Mapped[User] = relationship(back_populates="task_completions")
+    task: Mapped[Task] = relationship(back_populates="completions")

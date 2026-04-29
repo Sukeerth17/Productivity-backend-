@@ -98,15 +98,29 @@ async def delete_category(session: AsyncSession, category: Category) -> None:
 
 
 async def create_task(session: AsyncSession, user: User, payload: TaskCreate) -> Task:
-    category = await get_category(session, user, payload.category_id)
+    category = None
+    if payload.category_id:
+        category = await get_category(session, user, payload.category_id)
+        
     if not category:
-        raise ValueError("Invalid category_id")
-
+        # Fallback to creating/fetching "General" category
+        stmt = select(Category).where(
+            Category.user_id == user.id,
+            func.lower(Category.name) == "general"
+        )
+        cat_res = await session.execute(stmt)
+        category = cat_res.scalar_one_or_none()
+        if not category:
+            category = Category(user_id=user.id, name="General", color="#6B7280", icon="folder")
+            session.add(category)
+            await session.commit()
+            await session.refresh(category)
+            
     completed_at = datetime.now(timezone.utc) if payload.completed else None
     task = Task(
         user_id=user.id,
         title=payload.title.strip(),
-        category_id=payload.category_id,
+        category_id=category.id,
         notes=payload.notes,
         completed=payload.completed,
         completed_at=completed_at,
@@ -119,8 +133,8 @@ async def create_task(session: AsyncSession, user: User, payload: TaskCreate) ->
 
     session.add(task)
     await session.commit()
-    # Recalculate productivity stats
-    await calculate_and_store_productivity_stats(session, user)
+    # Adjust persistent ledger totals
+    await adjust_stats(session, user.id, total_delta=1, completed_delta=1 if payload.completed else 0)
     return await get_task_or_none(session, user, task.id, with_subtasks=True)
 
 
@@ -179,10 +193,17 @@ async def update_task(session: AsyncSession, user: User, task: Task, payload: Ta
     if "title" in data and data["title"] is not None:
         data["title"] = data["title"].strip()
     if "completed" in data and data["completed"] is not None:
-        if data["completed"] and not task.completed:
+        old_completed = task.completed
+        new_completed = data["completed"]
+        if new_completed != old_completed:
+            completed_delta = 1 if new_completed else -1
+            await adjust_stats(session, user.id, completed_delta=completed_delta)
+        
+        if new_completed and not old_completed:
             task.completed_at = datetime.now(timezone.utc)
-        elif not data["completed"]:
+        elif not new_completed:
             task.completed_at = None
+            
     for key, value in data.items():
         setattr(task, key, value)
     await session.commit()
@@ -231,8 +252,9 @@ async def toggle_task_completion(session: AsyncSession, user: User, task: Task) 
     task.completed = not task.completed
     task.completed_at = datetime.now(timezone.utc) if task.completed else None
     await session.commit()
-    # Recalculate productivity stats
-    await calculate_and_store_productivity_stats(session, user)
+    # Adjust persistent ledger totals
+    completed_delta = 1 if task.completed else -1
+    await adjust_stats(session, user.id, completed_delta=completed_delta)
     return await get_task_or_none(session, user, task.id, with_subtasks=True)
 
 
@@ -354,7 +376,11 @@ async def category_completion_stats(
 
 
 async def update_user_profile(session: AsyncSession, user: User, payload: UserUpdate) -> User:
-    user.name = payload.name.strip()
+    data = payload.model_dump(exclude_unset=True)
+    if "name" in data and data["name"] is not None:
+        user.name = data["name"].strip()
+    if "password" in data and data["password"] is not None:
+        user.password_hash = hash_password(data["password"])
     await session.commit()
     await session.refresh(user)
     return user
@@ -540,10 +566,48 @@ async def calculate_and_store_productivity_stats(
     return stats
 
 
+async def adjust_stats(
+    session: AsyncSession,
+    user_id: str,
+    total_delta: int = 0,
+    completed_delta: int = 0,
+) -> None:
+    """Adjust persistent ledger totals for a user."""
+    result = await session.execute(select(ProductivityStats).where(ProductivityStats.user_id == user_id))
+    stats = result.scalar_one_or_none()
+    if not stats:
+        stats = ProductivityStats(user_id=user_id)
+        session.add(stats)
+        
+    stats.alltime_total_tasks = max(0, stats.alltime_total_tasks + total_delta)
+    stats.alltime_completed_tasks = max(0, stats.alltime_completed_tasks + completed_delta)
+    
+    stats.month_total_tasks = max(0, stats.month_total_tasks + total_delta)
+    stats.month_completed_tasks = max(0, stats.month_completed_tasks + completed_delta)
+    
+    stats.week_total_tasks = max(0, stats.week_total_tasks + total_delta)
+    stats.week_completed_tasks = max(0, stats.week_completed_tasks + completed_delta)
+    
+    stats.day_total_tasks = max(0, stats.day_total_tasks + total_delta)
+    stats.day_completed_tasks = max(0, stats.day_completed_tasks + completed_delta)
+    
+    stats.alltime_completion_rate = round((stats.alltime_completed_tasks / stats.alltime_total_tasks * 100) if stats.alltime_total_tasks else 0.0, 2)
+    stats.month_completion_rate = round((stats.month_completed_tasks / stats.month_total_tasks * 100) if stats.month_total_tasks else 0.0, 2)
+    stats.week_completion_rate = round((stats.week_completed_tasks / stats.week_total_tasks * 100) if stats.week_total_tasks else 0.0, 2)
+    stats.day_completion_rate = round((stats.day_completed_tasks / stats.day_total_tasks * 100) if stats.day_total_tasks else 0.0, 2)
+    
+    await session.commit()
+
+
 async def get_productivity_stats(session: AsyncSession, user: User) -> ProductivityStatsOut:
     """Get stored productivity stats."""
-    # First calculate and store/update stats
-    stats = await calculate_and_store_productivity_stats(session, user)
+    result = await session.execute(select(ProductivityStats).where(ProductivityStats.user_id == user.id))
+    stats = result.scalar_one_or_none()
+    if not stats:
+        stats = ProductivityStats(user_id=user.id)
+        session.add(stats)
+        await session.commit()
+        await session.refresh(stats)
     
     # Parse category breakdown
     category_breakdown = None
