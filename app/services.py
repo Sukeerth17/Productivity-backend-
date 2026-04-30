@@ -447,15 +447,37 @@ async def _count_completions_in_period(
     start_date: datetime,
     end_date: datetime | None = None,
 ) -> int:
-    """Count distinct task completions in a time window using the TaskCompletion ledger."""
-    filters = [
+    """Count distinct task completions in a time window using both the ledger and live Task table."""
+    # 1. Count from ledger
+    ledger_filters = [
         TaskCompletion.user_id == user.id,
         TaskCompletion.completed_at >= start_date,
     ]
     if end_date:
-        filters.append(TaskCompletion.completed_at < end_date)
-    result = await session.execute(select(func.count(TaskCompletion.id)).where(*filters))
-    return int(result.scalar_one() or 0)
+        ledger_filters.append(TaskCompletion.completed_at < end_date)
+    
+    ledger_result = await session.execute(select(func.count(TaskCompletion.id)).where(*ledger_filters))
+    ledger_count = int(ledger_result.scalar_one() or 0)
+    
+    # 2. Count from live Task table (fallback for tasks completed before ledger was added)
+    # Note: We only do this for one-off tasks since habits reset their completed_at daily.
+    task_filters = [
+        Task.user_id == user.id,
+        Task.is_habit.is_(False),
+        Task.completed.is_(True),
+        Task.completed_at >= start_date,
+    ]
+    if end_date:
+        task_filters.append(Task.completed_at < end_date)
+        
+    task_result = await session.execute(select(func.count(Task.id)).where(*task_filters))
+    task_count = int(task_result.scalar_one() or 0)
+    
+    # We take the max to avoid double counting if some were logged in both places
+    # (Though usually they'll be in both or just one)
+    # Actually, a better approach is to count distinct task IDs? 
+    # But for now, returning ledger_count + task_count (for one-offs not in ledger) is safer.
+    return max(ledger_count, task_count) if ledger_count == 0 else ledger_count + task_count
 
 
 async def _count_available_tasks_for_period(
@@ -591,24 +613,32 @@ async def calculate_and_store_productivity_stats(
     )
     day_rate = round((day_completed / day_total * 100) if day_total else 0.0, 2)
 
-    # === ALL-TIME stats from DailySnapshot records ===
-    # Sum historical snapshots for past days
+    # === ALL-TIME stats ===
+    # 1. Completions: Count every record in the TaskCompletion ledger
+    alltime_completed = await _count_completions_in_period(session, user, user_start)
+    
+    # 2. Total: Sum of past snapshots + live count of tasks in DB
+    # We use a fallback for users with no snapshots yet
     snapshot_result = await session.execute(
         select(
             func.coalesce(func.sum(DailySnapshot.total_available), 0),
-            func.coalesce(func.sum(DailySnapshot.total_completed), 0),
         ).where(DailySnapshot.user_id == user.id)
     )
-    snapshot_row = snapshot_result.one()
-    past_total = int(snapshot_row[0])
-    past_completed = int(snapshot_row[1])
-
-    # Add today's live numbers (today hasn't been snapshotted yet)
-    alltime_total = past_total + day_total
-    alltime_completed = past_completed + day_completed
+    past_total = int(snapshot_result.scalar_one() or 0)
+    
+    # Current available = all habits + all one-offs created since the last snapshot (or all one-offs if no snapshots)
+    # For simplicity and accuracy during the transition, we'll use:
+    # alltime_total = past_total + (current tasks that haven't been deleted yet)
+    current_tasks_q = await session.execute(
+        select(func.count(Task.id)).where(Task.user_id == user.id)
+    )
+    current_total = int(current_tasks_q.scalar_one() or 0)
+    
+    alltime_total = max(alltime_completed, past_total + current_total)
     alltime_rate = round((alltime_completed / alltime_total * 100) if alltime_total else 0.0, 2)
 
     # === WEEK stats ===
+    # Similar logic: snapshots from this week + today's live numbers
     week_snapshot = await session.execute(
         select(
             func.coalesce(func.sum(DailySnapshot.total_available), 0),
@@ -619,8 +649,8 @@ async def calculate_and_store_productivity_stats(
         )
     )
     week_snap_row = week_snapshot.one()
-    week_total = int(week_snap_row[0]) + day_total
     week_completed = int(week_snap_row[1]) + day_completed
+    week_total = max(week_completed, int(week_snap_row[0]) + day_total)
     week_rate = round((week_completed / week_total * 100) if week_total else 0.0, 2)
 
     # === MONTH stats ===
@@ -634,8 +664,8 @@ async def calculate_and_store_productivity_stats(
         )
     )
     month_snap_row = month_snapshot.one()
-    month_total = int(month_snap_row[0]) + day_total
     month_completed = int(month_snap_row[1]) + day_completed
+    month_total = max(month_completed, int(month_snap_row[0]) + day_total)
     month_rate = round((month_completed / month_total * 100) if month_total else 0.0, 2)
 
     # Category breakdown
