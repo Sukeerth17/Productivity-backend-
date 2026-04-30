@@ -202,3 +202,22 @@ class TaskCompletion(Base):
     
     user: Mapped[User] = relationship(back_populates="task_completions")
     task: Mapped[Task] = relationship(back_populates="completions")
+
+
+class DailySnapshot(Base):
+    """Store daily stats so that alltime totals survive task deletion."""
+    __tablename__ = "daily_snapshots"
+    __table_args__ = (
+        Index("ix_daily_snapshots_user_date", "user_id", "snapshot_date", unique=True),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=lambda: str(uuid4()))
+    user_id: Mapped[str] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"),
+        index=True,
+    )
+    snapshot_date: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+    total_available: Mapped[int] = mapped_column(Integer, default=0)
+    total_completed: Mapped[int] = mapped_column(Integer, default=0)
+
+    user: Mapped[User] = relationship()
