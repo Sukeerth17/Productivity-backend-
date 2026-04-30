@@ -208,6 +208,7 @@ async def update_task(session: AsyncSession, user: User, task: Task, payload: Ta
             session.add(TaskCompletion(
                 user_id=user.id,
                 task_id=task.id,
+                category_id=task.category_id,
                 task_title=task.title,
                 is_habit=task.is_habit,
                 completed_at=task.completed_at,
@@ -268,6 +269,7 @@ async def toggle_task_completion(session: AsyncSession, user: User, task: Task) 
         session.add(TaskCompletion(
             user_id=user.id,
             task_id=task.id,
+            category_id=task.category_id,
             task_title=task.title,
             is_habit=task.is_habit,
             completed_at=task.completed_at,
@@ -500,6 +502,49 @@ async def _count_available_tasks_for_period(
         habit_total += min(days_active, days_in_period)
 
     return oneoff_total + habit_total
+
+
+async def _get_category_breakdown(session: AsyncSession, user: User) -> list[CategoryBreakdownItem]:
+    """Get category breakdown for all-time stats using TaskCompletion ledger."""
+    categories_result = await session.execute(select(Category).where(Category.user_id == user.id))
+    categories = categories_result.scalars().all()
+    
+    breakdown = []
+    for cat in categories:
+        # Count all-time completions for this category from TaskCompletion ledger
+        # We look at category_id directly in TaskCompletion for persistence after task deletion
+        completions_q = await session.execute(
+            select(func.count(TaskCompletion.id)).where(
+                TaskCompletion.user_id == user.id,
+                TaskCompletion.category_id == cat.id
+            )
+        )
+        completed = int(completions_q.scalar_one() or 0)
+        
+        # Total tasks for a category = (Current Tasks in DB) + (Completions in Ledger)
+        # Note: This is an approximation since a task might have multiple completions (if habit)
+        # But for breakdown, we want to show volume.
+        current_total_q = await session.execute(
+            select(func.count(Task.id)).where(
+                Task.user_id == user.id, 
+                Task.category_id == cat.id,
+                Task.completed.is_(False) # Only count active tasks toward current "total"
+            )
+        )
+        active = int(current_total_q.scalar_one() or 0)
+        
+        total = completed + active
+        rate = round((completed / total * 100) if total else 0.0, 2)
+        
+        breakdown.append(CategoryBreakdownItem(
+            category_id=cat.id,
+            category_name=cat.name,
+            color=cat.color,
+            total_tasks=total,
+            completed_tasks=completed,
+            completion_rate=rate
+        ))
+    return breakdown
 
 
 async def calculate_and_store_productivity_stats(

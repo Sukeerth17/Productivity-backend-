@@ -192,9 +192,15 @@ class TaskCompletion(Base):
         ForeignKey("users.id", ondelete="CASCADE"),
         index=True,
     )
-    task_id: Mapped[str] = mapped_column(
-        ForeignKey("tasks.id", ondelete="CASCADE"),
+    task_id: Mapped[str | None] = mapped_column(
+        ForeignKey("tasks.id", ondelete="SET NULL"),
         index=True,
+        nullable=True,
+    )
+    category_id: Mapped[str | None] = mapped_column(
+        ForeignKey("categories.id", ondelete="SET NULL"),
+        index=True,
+        nullable=True,
     )
     task_title: Mapped[str] = mapped_column(String(240))  # Store title for history after task deletion
     is_habit: Mapped[bool] = mapped_column(Boolean, default=False)
@@ -202,6 +208,7 @@ class TaskCompletion(Base):
     
     user: Mapped[User] = relationship(back_populates="task_completions")
     task: Mapped[Task] = relationship(back_populates="completions")
+    category: Mapped[Category | None] = relationship()
 
 
 class DailySnapshot(Base):
