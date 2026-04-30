@@ -39,10 +39,32 @@ async def _ensure_indexes(conn: AsyncConnection) -> None:
         await conn.execute(text(statement))
 
 
+async def _ensure_extra_columns(conn: AsyncConnection) -> None:
+    # Ensure task_completions has category_id and task_id can be null
+    has_cat_id = await conn.run_sync(lambda sync_conn: _has_column(sync_conn, "task_completions", "category_id"))
+    if not has_cat_id:
+        await conn.execute(text("ALTER TABLE task_completions ADD COLUMN category_id VARCHAR(36)"))
+        await conn.execute(text("ALTER TABLE task_completions ADD CONSTRAINT fk_task_completions_category FOREIGN KEY (category_id) REFERENCES categories(id) ON DELETE SET NULL"))
+
+    # Ensure task_completions task_id is nullable (it was previously non-nullable in some versions)
+    await conn.execute(text("ALTER TABLE task_completions ALTER COLUMN task_id DROP NOT NULL"))
+    
+    # Ensure task_completions task_id has SET NULL instead of CASCADE
+    try:
+        await conn.execute(text("ALTER TABLE task_completions DROP CONSTRAINT task_completions_task_id_fkey"))
+    except Exception:
+        pass
+    try:
+        await conn.execute(text("ALTER TABLE task_completions ADD CONSTRAINT task_completions_task_id_fkey FOREIGN KEY (task_id) REFERENCES tasks(id) ON DELETE SET NULL"))
+    except Exception:
+        pass
+
+
 async def prepare_database(engine: AsyncEngine) -> None:
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
         await _ensure_user_id_column(conn, "categories")
         await _ensure_user_id_column(conn, "tasks")
+        await _ensure_extra_columns(conn)
         await _backfill_existing_owner(conn)
         await _ensure_indexes(conn)
