@@ -448,7 +448,7 @@ async def _count_completions_in_period(
     end_date: datetime | None = None,
 ) -> int:
     """Count distinct task completions in a time window using both the ledger and live Task table."""
-    # 1. Count from ledger
+    # 1. Get task IDs from ledger
     ledger_filters = [
         TaskCompletion.user_id == user.id,
         TaskCompletion.completed_at >= start_date,
@@ -456,11 +456,10 @@ async def _count_completions_in_period(
     if end_date:
         ledger_filters.append(TaskCompletion.completed_at < end_date)
     
-    ledger_result = await session.execute(select(func.count(TaskCompletion.id)).where(*ledger_filters))
-    ledger_count = int(ledger_result.scalar_one() or 0)
+    ledger_result = await session.execute(select(TaskCompletion.task_id).where(*ledger_filters))
+    completed_task_ids = set(ledger_result.scalars().all())
     
-    # 2. Count from live Task table (fallback for tasks completed before ledger was added)
-    # Note: We only do this for one-off tasks since habits reset their completed_at daily.
+    # 2. Get task IDs from live Task table (fallback for tasks completed before ledger was added)
     task_filters = [
         Task.user_id == user.id,
         Task.is_habit.is_(False),
@@ -470,14 +469,12 @@ async def _count_completions_in_period(
     if end_date:
         task_filters.append(Task.completed_at < end_date)
         
-    task_result = await session.execute(select(func.count(Task.id)).where(*task_filters))
-    task_count = int(task_result.scalar_one() or 0)
+    task_result = await session.execute(select(Task.id).where(*task_filters))
+    for tid in task_result.scalars().all():
+        completed_task_ids.add(tid)
     
-    # We take the max to avoid double counting if some were logged in both places
-    # (Though usually they'll be in both or just one)
-    # Actually, a better approach is to count distinct task IDs? 
-    # But for now, returning ledger_count + task_count (for one-offs not in ledger) is safer.
-    return max(ledger_count, task_count) if ledger_count == 0 else ledger_count + task_count
+    # The count is the number of unique task IDs found
+    return len([tid for tid in completed_task_ids if tid is not None])
 
 
 async def _count_available_tasks_for_period(
