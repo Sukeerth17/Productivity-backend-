@@ -291,15 +291,27 @@ async def toggle_subtask_completion(session: AsyncSession, subtask: SubTask) -> 
 
 
 async def dashboard_stats(session: AsyncSession, user: User) -> dict[str, float | int]:
+    # Define "today" in UTC
+    now = datetime.now(timezone.utc)
+    today_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+    
     filters = [Task.user_id == user.id, Task.is_deleted.is_(False)]
-    total_q = await session.execute(select(func.count(Task.id)).where(*filters))
-    completed_q = await session.execute(select(func.count(Task.id)).where(*filters, Task.completed.is_(True)))
+    
+    # Active tasks = Pending tasks
+    active_q = await session.execute(select(func.count(Task.id)).where(*filters, Task.completed.is_(False)))
+    active = int(active_q.scalar_one())
+    
+    # Completed today = Completed and completed_at is today
+    completed_today_q = await session.execute(
+        select(func.count(Task.id)).where(*filters, Task.completed.is_(True), Task.completed_at >= today_start)
+    )
+    completed = int(completed_today_q.scalar_one())
+    
+    # Total for today = Active + Completed Today
+    total = active + completed
+    
     categories_q = await session.execute(select(func.count(Category.id)).where(Category.user_id == user.id))
-
-    total = int(total_q.scalar_one())
-    completed = int(completed_q.scalar_one())
     categories = int(categories_q.scalar_one())
-    active = total - completed
 
     return {
         "total_tasks": total,
