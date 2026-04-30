@@ -59,6 +59,13 @@ async def _ensure_extra_columns(conn: AsyncConnection) -> None:
     except Exception:
         pass
 
+    # Ensure tasks table has is_deleted and deleted_at
+    has_is_deleted = await conn.run_sync(lambda sync_conn: _has_column(sync_conn, "tasks", "is_deleted"))
+    if not has_is_deleted:
+        await conn.execute(text("ALTER TABLE tasks ADD COLUMN is_deleted BOOLEAN DEFAULT FALSE"))
+        await conn.execute(text("ALTER TABLE tasks ADD COLUMN deleted_at TIMESTAMP WITH TIME ZONE"))
+        await conn.execute(text("CREATE INDEX IF NOT EXISTS ix_tasks_is_deleted ON tasks (is_deleted)"))
+
 
 async def prepare_database(engine: AsyncEngine) -> None:
     async with engine.begin() as conn:
