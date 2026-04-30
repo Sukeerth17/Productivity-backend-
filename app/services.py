@@ -642,15 +642,10 @@ async def adjust_stats(
 
 async def get_productivity_stats(session: AsyncSession, user: User) -> ProductivityStatsOut:
     """Get stored productivity stats."""
-    result = await session.execute(select(ProductivityStats).where(ProductivityStats.user_id == user.id))
-    stats = result.scalar_one_or_none()
-    if not stats:
-        stats = ProductivityStats(user_id=user.id)
-        session.add(stats)
-        await session.commit()
-        await session.refresh(stats)
+    # Recalculate stats from scratch to ensure sync with actual data
+    stats = await calculate_and_store_productivity_stats(session, user)
     
-    # Reset boundaries if needed
+    # Boundary resets (redundant but safe if we want to enforce specific time logic)
     now = datetime.now(timezone.utc)
     changed = False
     

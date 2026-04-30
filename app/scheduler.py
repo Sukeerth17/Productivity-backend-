@@ -38,12 +38,11 @@ async def reset_habit_tasks() -> None:
     async with async_session() as session:
         today_start = datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0)
         
-        # Get all completed habit tasks from today
+        # Get all completed habit tasks
         stmt = select(Task).where(
             and_(
                 Task.is_habit.is_(True),
                 Task.completed.is_(True),
-                Task.completed_at >= today_start,
             )
         )
         
