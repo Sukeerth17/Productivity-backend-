@@ -434,7 +434,11 @@ async def login(session: AsyncSession, payload: LoginRequest) -> User:
     user = user_result.scalar_one_or_none()
     if not user or not verify_password(payload.password, user.password_hash):
         raise ValueError("Invalid email or password")
-    user.auth_token = generate_token()
+    
+    # Only generate a new token if one doesn't exist
+    if not user.auth_token:
+        user.auth_token = generate_token()
+        
     await session.commit()
     await session.refresh(user)
     await _claim_orphaned_data_for_single_user(session, user)
