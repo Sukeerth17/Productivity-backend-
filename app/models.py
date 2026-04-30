@@ -91,21 +91,24 @@ class Task(Base):
     notes: Mapped[str | None] = mapped_column(Text, nullable=True)
     completed: Mapped[bool] = mapped_column(Boolean, default=False, index=True)
     is_habit: Mapped[bool] = mapped_column(Boolean, default=False)
-    priority: Mapped[str | None] = mapped_column(String(10), nullable=True)
-    due_time: Mapped[str | None] = mapped_column(String(12), nullable=True)
+    priority: Mapped[int] = mapped_column(Integer, default=0)
+    due_time: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
     category_id: Mapped[str] = mapped_column(
         ForeignKey("categories.id", ondelete="CASCADE"),
         index=True,
     )
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now_utc, index=True)
-    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True, index=True)
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         default=now_utc,
         onupdate=now_utc,
-        index=True,
     )
+    
+    # Soft deletion for history preservation
+    is_deleted: Mapped[bool] = mapped_column(Boolean, default=False, index=True)
+    deleted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
     user: Mapped[User | None] = relationship(back_populates="tasks")
     category: Mapped[Category] = relationship(back_populates="tasks", lazy="joined")

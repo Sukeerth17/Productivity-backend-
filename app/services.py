@@ -161,7 +161,7 @@ async def list_tasks(
     limit: int,
     offset: int,
 ) -> tuple[list[Task], int]:
-    filters = [Task.user_id == user.id]
+    filters = [Task.user_id == user.id, Task.is_deleted.is_(False)]
     if category_id:
         filters.append(Task.category_id == category_id)
     if completed is not None:
@@ -223,7 +223,8 @@ async def update_task(session: AsyncSession, user: User, task: Task, payload: Ta
 
 
 async def delete_task(session: AsyncSession, task: Task) -> None:
-    await session.delete(task)
+    task.is_deleted = True
+    task.deleted_at = datetime.now(timezone.utc)
     await session.commit()
 
 
@@ -290,7 +291,7 @@ async def toggle_subtask_completion(session: AsyncSession, subtask: SubTask) -> 
 
 
 async def dashboard_stats(session: AsyncSession, user: User) -> dict[str, float | int]:
-    filters = [Task.user_id == user.id]
+    filters = [Task.user_id == user.id, Task.is_deleted.is_(False)]
     total_q = await session.execute(select(func.count(Task.id)).where(*filters))
     completed_q = await session.execute(select(func.count(Task.id)).where(*filters, Task.completed.is_(True)))
     categories_q = await session.execute(select(func.count(Category.id)).where(Category.user_id == user.id))
@@ -583,14 +584,20 @@ async def calculate_and_store_productivity_stats(
     day_completed = await _count_completions_in_period(session, user, today_start, today_end)
     # Day total = habits currently in DB + incomplete one-offs + one-offs completed TODAY
     # (One-offs completed on previous days but not yet deleted are excluded)
+    # Habits: count active habits + habits deleted specifically TODAY
     habit_count_q = await session.execute(
-        select(func.count(Task.id)).where(Task.user_id == user.id, Task.is_habit.is_(True))
+        select(func.count(Task.id)).where(
+            Task.user_id == user.id, 
+            Task.is_habit.is_(True),
+            (Task.is_deleted.is_(False)) | (Task.deleted_at >= today_start)
+        )
     )
     incomplete_oneoff_q = await session.execute(
         select(func.count(Task.id)).where(
             Task.user_id == user.id,
             Task.is_habit.is_(False),
             Task.completed.is_(False),
+            Task.is_deleted.is_(False),
         )
     )
     # One-offs completed today (specifically in the today_start to today_end window)
@@ -627,7 +634,7 @@ async def calculate_and_store_productivity_stats(
     # For simplicity and accuracy during the transition, we'll use:
     # alltime_total = past_total + (current tasks that haven't been deleted yet)
     current_tasks_q = await session.execute(
-        select(func.count(Task.id)).where(Task.user_id == user.id)
+        select(func.count(Task.id)).where(Task.user_id == user.id, Task.is_deleted.is_(False))
     )
     current_total = int(current_tasks_q.scalar_one() or 0)
     

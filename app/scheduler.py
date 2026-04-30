@@ -33,10 +33,14 @@ async def _write_daily_snapshots() -> None:
             if existing.scalar_one_or_none():
                 continue
 
-            # Count today's available tasks: habits + INCOMPLETE one-offs
+            # Count today's available tasks: 
+            # - Active habits + habits deleted specifically TODAY
+            # - INCOMPLETE one-offs (not deleted)
             habit_count = await session.execute(
                 select(func.count(Task.id)).where(
-                    Task.user_id == user.id, Task.is_habit.is_(True)
+                    Task.user_id == user.id, 
+                    Task.is_habit.is_(True),
+                    (Task.is_deleted.is_(False)) | (Task.deleted_at >= today_start)
                 )
             )
             oneoff_count = await session.execute(
@@ -44,6 +48,7 @@ async def _write_daily_snapshots() -> None:
                     Task.user_id == user.id,
                     Task.is_habit.is_(False),
                     Task.completed.is_(False),
+                    Task.is_deleted.is_(False),
                 )
             )
             total_available = int(habit_count.scalar_one() or 0) + int(oneoff_count.scalar_one() or 0)
@@ -101,6 +106,7 @@ async def reset_habit_tasks() -> None:
             and_(
                 Task.is_habit.is_(True),
                 Task.completed.is_(True),
+                Task.is_deleted.is_(False),
             )
         )
 
