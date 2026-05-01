@@ -600,17 +600,18 @@ async def calculate_and_store_productivity_stats(
 
     # === DAY stats ===
     day_completed = await _count_completions_in_period(session, user, today_start, today_end)
-    # Day total = habits currently in DB + incomplete one-offs + one-offs completed TODAY
-    # (One-offs completed on previous days but not yet deleted are excluded)
-    # Habits: count active habits + habits deleted specifically TODAY
-    habit_count_q = await session.execute(
+    
+    # Get counts once and reuse
+    habit_count_res = await session.execute(
         select(func.count(Task.id)).where(
             Task.user_id == user.id, 
             Task.is_habit.is_(True),
             (Task.is_deleted.is_(False)) | (Task.deleted_at >= today_start)
         )
     )
-    incomplete_oneoff_q = await session.execute(
+    habit_count = int(habit_count_res.scalar_one() or 0)
+    
+    incomplete_oneoff_res = await session.execute(
         select(func.count(Task.id)).where(
             Task.user_id == user.id,
             Task.is_habit.is_(False),
@@ -618,8 +619,9 @@ async def calculate_and_store_productivity_stats(
             Task.is_deleted.is_(False),
         )
     )
-    # One-offs completed today (specifically in the today_start to today_end window)
-    today_oneoff_completed_q = await session.execute(
+    incomplete_oneoff_count = int(incomplete_oneoff_res.scalar_one() or 0)
+    
+    today_oneoff_completed_res = await session.execute(
         select(func.count(TaskCompletion.id)).where(
             TaskCompletion.user_id == user.id,
             TaskCompletion.is_habit.is_(False),
@@ -627,45 +629,30 @@ async def calculate_and_store_productivity_stats(
             TaskCompletion.completed_at < today_end,
         )
     )
+    today_oneoff_completed_count = int(today_oneoff_completed_res.scalar_one() or 0)
     
-    day_total = (
-        int(habit_count_q.scalar_one() or 0) + 
-        int(incomplete_oneoff_q.scalar_one() or 0) + 
-        int(today_oneoff_completed_q.scalar_one() or 0)
-    )
+    day_total = habit_count + incomplete_oneoff_count + today_oneoff_completed_count
     day_rate = round((day_completed / day_total * 100) if day_total else 0.0, 2)
 
     # === ALL-TIME stats ===
-    # 1. Completions: Count every record in the TaskCompletion ledger
     alltime_completed = await _count_completions_in_period(session, user, user_start)
     
-    # 2. Total: Sum of past snapshots + live count of tasks in DB
-    # We use a fallback for users with no snapshots yet
     snapshot_result = await session.execute(
-        select(
-            func.coalesce(func.sum(DailySnapshot.total_available), 0),
-        ).where(DailySnapshot.user_id == user.id)
+        select(func.coalesce(func.sum(DailySnapshot.total_available), 0)).where(DailySnapshot.user_id == user.id)
     )
     past_total = int(snapshot_result.scalar_one() or 0)
     
-    # Current available = all habits + all one-offs created since the last snapshot (or all one-offs if no snapshots)
-    # For simplicity and accuracy during the transition, we'll use:
-    # alltime_total = past_total + (current tasks that haven't been deleted yet)
-    current_tasks_q = await session.execute(
+    current_tasks_res = await session.execute(
         select(func.count(Task.id)).where(Task.user_id == user.id, Task.is_deleted.is_(False))
     )
-    current_total = int(current_tasks_q.scalar_one() or 0)
+    current_total = int(current_tasks_res.scalar_one() or 0)
     
     alltime_total = max(alltime_completed, past_total + current_total)
     alltime_rate = round((alltime_completed / alltime_total * 100) if alltime_total else 0.0, 2)
 
     # === WEEK stats ===
-    # For a robust week count without relying solely on snapshots:
-    # 1. Completions: Already accurate via ledger
     week_completed = await _count_completions_in_period(session, user, week_start)
     
-    # 2. Total: snapshots + reconstruction for missing days
-    # Get snapshots first
     week_snapshot_q = await session.execute(
         select(DailySnapshot).where(
             DailySnapshot.user_id == user.id,
@@ -682,25 +669,22 @@ async def calculate_and_store_productivity_stats(
         if d in snapshots:
             week_total += snapshots[d].total_available
         else:
-            # Estimate: what was the "total available" on this day?
-            # It was (Habits active then) + (Any one-offs completed then) + (Any currently pending one-offs)
-            # This is a safe fallback that reconstructs history
-            habit_then_q = await session.execute(
+            # Estimate missing history
+            habit_then_res = await session.execute(
                 select(func.count(Task.id)).where(
                     Task.user_id == user.id, 
                     Task.is_habit.is_(True),
                     (Task.is_deleted.is_(False)) | (Task.deleted_at >= cursor + timedelta(days=1))
                 )
             )
+            habit_then = int(habit_then_res.scalar_one() or 0)
             completions_then = await _count_completions_in_period(session, user, cursor, cursor + timedelta(days=1))
-            # Current pending one-offs are assumed to have been available then too
-            week_total += int(habit_then_q.scalar_one() or 0) + int(incomplete_oneoff_q.scalar_one() or 0) + completions_then
+            week_total += habit_then + incomplete_oneoff_count + completions_then
         cursor += timedelta(days=1)
         
     week_rate = round((week_completed / week_total * 100) if week_total else 0.0, 2)
 
     # === MONTH stats ===
-    # Same reconstruction logic for the month
     month_completed = await _count_completions_in_period(session, user, month_start)
     
     month_snapshot_q = await session.execute(
@@ -719,15 +703,16 @@ async def calculate_and_store_productivity_stats(
         if d in m_snapshots:
             month_total += m_snapshots[d].total_available
         else:
-            habit_then_q = await session.execute(
+            habit_then_res = await session.execute(
                 select(func.count(Task.id)).where(
                     Task.user_id == user.id, 
                     Task.is_habit.is_(True),
                     (Task.is_deleted.is_(False)) | (Task.deleted_at >= m_cursor + timedelta(days=1))
                 )
             )
+            habit_then = int(habit_then_res.scalar_one() or 0)
             completions_then = await _count_completions_in_period(session, user, m_cursor, m_cursor + timedelta(days=1))
-            month_total += int(habit_then_q.scalar_one() or 0) + int(incomplete_oneoff_q.scalar_one() or 0) + completions_then
+            month_total += habit_then + incomplete_oneoff_count + completions_then
         m_cursor += timedelta(days=1)
 
     month_rate = round((month_completed / month_total * 100) if month_total else 0.0, 2)
