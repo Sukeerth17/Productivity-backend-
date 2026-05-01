@@ -114,6 +114,11 @@ class DashboardStats(BaseModel):
     completion_rate: float
 
 
+class TrendPoint(BaseModel):
+    date: str
+    rate: float
+
+
 class CategoryCompletionStats(BaseModel):
     category_id: str
     category_name: str
@@ -193,6 +198,9 @@ class ProductivityStatsOut(BaseModel):
     day_total_tasks: int
     day_completed_tasks: int
     day_completion_rate: float
+    
+    # Trend for last 7 days
+    trend: list[TrendPoint] = Field(default_factory=list)
     
     # Category breakdown for all-time
     category_breakdown: list[CategoryBreakdownItem] | None = None

@@ -91,7 +91,7 @@ class Task(Base):
     notes: Mapped[str | None] = mapped_column(Text, nullable=True)
     completed: Mapped[bool] = mapped_column(Boolean, default=False, index=True)
     is_habit: Mapped[bool] = mapped_column(Boolean, default=False)
-    priority: Mapped[int] = mapped_column(Integer, default=0)
+    priority: Mapped[str] = mapped_column(String(20), default="low")
     due_time: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
     category_id: Mapped[str] = mapped_column(

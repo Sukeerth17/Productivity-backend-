@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import date, datetime, timedelta, timezone
 import json
 
-from sqlalchemy import Select, and_, case, func, select, update
+from sqlalchemy import Select, and_, case, func, or_, select, update, delete
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
@@ -19,6 +19,7 @@ from .schemas import (
     TaskCreate,
     TaskUpdate,
     UserUpdate,
+    TrendPoint,
     ProductivityStatsOut,
 )
 from .security import generate_token, hash_password, verify_password
@@ -117,6 +118,7 @@ async def create_task(session: AsyncSession, user: User, payload: TaskCreate) ->
             await session.refresh(category)
             
     completed_at = datetime.now(timezone.utc) if payload.completed else None
+    priority_map = {"low": 0, "medium": 1, "high": 2}
     task = Task(
         user_id=user.id,
         title=payload.title.strip(),
@@ -215,7 +217,17 @@ async def update_task(session: AsyncSession, user: User, task: Task, payload: Ta
             ))
         elif not new_completed:
             task.completed_at = None
-            
+            # If uncompleted today, delete today's completion records to undo
+            today_start = datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0)
+            await session.execute(
+                delete(TaskCompletion).where(
+                    TaskCompletion.task_id == task.id,
+                    TaskCompletion.completed_at >= today_start
+                )
+            )
+    if "priority" in data:
+        task.priority = data.pop("priority")
+        
     for key, value in data.items():
         setattr(task, key, value)
     await session.commit()
@@ -275,6 +287,15 @@ async def toggle_task_completion(session: AsyncSession, user: User, task: Task) 
             is_habit=task.is_habit,
             completed_at=task.completed_at,
         ))
+    else:
+        # If uncompleted today, delete today's completion records to undo
+        today_start = datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0)
+        await session.execute(
+            delete(TaskCompletion).where(
+                TaskCompletion.task_id == task.id,
+                TaskCompletion.completed_at >= today_start
+            )
+        )
     
     await session.commit()
     # Adjust persistent ledger totals
@@ -594,114 +615,60 @@ async def calculate_and_store_productivity_stats(
     month_start = today_start.replace(day=1)
 
     user_start = user.created_at if user.created_at.tzinfo else user.created_at.replace(tzinfo=timezone.utc)
+    
+    async def get_stats_for_period(start_date: datetime, end_date: datetime | None = None):
+        filters = [TaskCompletion.user_id == user.id, TaskCompletion.completed_at >= start_date]
+        if end_date:
+            filters.append(TaskCompletion.completed_at < end_date)
+        completed_q = await session.execute(select(func.count(TaskCompletion.id)).where(*filters))
+        completed = completed_q.scalar() or 0
+
+        avail_filters = [Task.user_id == user.id]
+        if end_date:
+            avail_filters.append(Task.created_at < end_date)
+        avail_filters.append(or_(Task.is_deleted.is_(False), Task.deleted_at >= start_date))
+        avail_filters.append(or_(Task.is_habit.is_(True), Task.completed.is_(False), Task.completed_at >= start_date))
+        
+        available_q = await session.execute(select(func.count(Task.id)).where(*avail_filters))
+        available = available_q.scalar() or 0
+        return available, completed
 
     # === DAY stats ===
-    day_completed = await _count_completions_in_period(session, user, today_start, today_end)
-    
-    # Get current live counts
-    habit_count_res = await session.execute(
-        select(func.count(Task.id)).where(
-            Task.user_id == user.id, 
-            Task.is_habit.is_(True),
-            (Task.is_deleted.is_(False)) | (Task.deleted_at >= today_start)
-        )
-    )
-    habit_count = int(habit_count_res.scalar_one() or 0)
-    
-    incomplete_oneoff_res = await session.execute(
-        select(func.count(Task.id)).where(
-            Task.user_id == user.id,
-            Task.is_habit.is_(False),
-            Task.completed.is_(False),
-            Task.is_deleted.is_(False),
-        )
-    )
-    incomplete_oneoff_count = int(incomplete_oneoff_res.scalar_one() or 0)
-    
-    today_oneoff_completed_res = await session.execute(
-        select(func.count(TaskCompletion.id)).where(
-            TaskCompletion.user_id == user.id,
-            TaskCompletion.is_habit.is_(False),
-            TaskCompletion.completed_at >= today_start,
-            TaskCompletion.completed_at < today_end,
-        )
-    )
-    today_oneoff_completed_count = int(today_oneoff_completed_res.scalar_one() or 0)
-    
-    day_total = habit_count + incomplete_oneoff_count + today_oneoff_completed_count
+    day_total, day_completed = await get_stats_for_period(today_start, today_end)
     day_rate = round((day_completed / day_total * 100) if day_total else 0.0, 2)
+    
 
     # === ALL-TIME stats ===
-    alltime_completed = await _count_completions_in_period(session, user, user_start)
-    
-    # Total = (All unique one-offs ever) + (All habit-days ever)
-    alltime_oneoff_completed_q = await session.execute(
-        select(func.count(TaskCompletion.id)).where(
-            TaskCompletion.user_id == user.id,
-            TaskCompletion.is_habit.is_(False)
-        )
-    )
-    # One-offs = Completed + Currently Pending
-    alltime_oneoffs = int(alltime_oneoff_completed_q.scalar_one() or 0) + incomplete_oneoff_count
-    
-    alltime_snapshot_q = await session.execute(
-        select(func.coalesce(func.sum(DailySnapshot.total_available), 0)).where(
-            DailySnapshot.user_id == user.id
-        )
-    )
-    # Habit-days = past habit snapshots + today's habits
-    alltime_habits = int(alltime_snapshot_q.scalar_one() or 0) + habit_count
-    
-    alltime_total = alltime_oneoffs + alltime_habits
+    alltime_total, alltime_completed = await get_stats_for_period(user_start, None)
     alltime_rate = round((alltime_completed / alltime_total * 100) if alltime_total else 0.0, 2)
 
     # === WEEK stats ===
-    week_completed = await _count_completions_in_period(session, user, week_start)
-    
-    week_oneoff_completed_q = await session.execute(
-        select(func.count(TaskCompletion.id)).where(
-            TaskCompletion.user_id == user.id,
-            TaskCompletion.is_habit.is_(False),
-            TaskCompletion.completed_at >= week_start
-        )
-    )
-    week_oneoffs = int(week_oneoff_completed_q.scalar_one() or 0) + incomplete_oneoff_count
-    
-    week_snapshot_q = await session.execute(
-        select(func.coalesce(func.sum(DailySnapshot.total_available), 0)).where(
-            DailySnapshot.user_id == user.id,
-            DailySnapshot.snapshot_date >= week_start,
-            DailySnapshot.snapshot_date < today_start
-        )
-    )
-    week_habits = int(week_snapshot_q.scalar_one() or 0) + habit_count
-    
-    week_total = week_oneoffs + week_habits
+    week_total, week_completed = await get_stats_for_period(week_start, today_end)
     week_rate = round((week_completed / week_total * 100) if week_total else 0.0, 2)
 
     # === MONTH stats ===
-    month_completed = await _count_completions_in_period(session, user, month_start)
-    
-    month_oneoff_completed_q = await session.execute(
-        select(func.count(TaskCompletion.id)).where(
-            TaskCompletion.user_id == user.id,
-            TaskCompletion.is_habit.is_(False),
-            TaskCompletion.completed_at >= month_start
-        )
-    )
-    month_oneoffs = int(month_oneoff_completed_q.scalar_one() or 0) + incomplete_oneoff_count
-    
-    month_snapshot_q = await session.execute(
-        select(func.coalesce(func.sum(DailySnapshot.total_available), 0)).where(
-            DailySnapshot.user_id == user.id,
-            DailySnapshot.snapshot_date >= month_start,
-            DailySnapshot.snapshot_date < today_start
-        )
-    )
-    month_habits = int(month_snapshot_q.scalar_one() or 0) + habit_count
-    
-    month_total = month_oneoffs + month_habits
+    month_total, month_completed = await get_stats_for_period(month_start, today_end)
     month_rate = round((month_completed / month_total * 100) if month_total else 0.0, 2)
+
+    # === TREND stats ===
+    trend = []
+    lookback = today_start - timedelta(days=6)
+    account_start = user.created_at.replace(hour=0, minute=0, second=0, microsecond=0)
+    if account_start.tzinfo is None and today_start.tzinfo is not None:
+        account_start = account_start.replace(tzinfo=timezone.utc)
+    
+    trend_start = min(account_start, lookback)
+    trend_start = max(trend_start, today_start - timedelta(days=365))
+    days_to_show = (today_start.date() - trend_start.date()).days
+    
+    for i in range(days_to_show, 0, -1):
+        target_start = today_start - timedelta(days=i)
+        target_end = target_start + timedelta(days=1)
+        avail, comp = await get_stats_for_period(target_start, target_end)
+        rate = round((comp / avail * 100) if avail else 0.0, 2)
+        trend.append(TrendPoint(date=target_start.date().strftime("%b %d"), rate=rate))
+    
+    trend.append(TrendPoint(date=now.strftime("%b %d"), rate=day_rate))
 
     # Category breakdown
     category_breakdown = await _get_category_breakdown(session, user)
@@ -748,7 +715,29 @@ async def calculate_and_store_productivity_stats(
 
     await session.commit()
     await session.refresh(stats)
-    return stats
+    
+    return ProductivityStatsOut(
+        alltime_total_tasks=int(stats.alltime_total_tasks or 0),
+        alltime_completed_tasks=int(stats.alltime_completed_tasks or 0),
+        alltime_completion_rate=float(stats.alltime_completion_rate or 0.0),
+        month_total_tasks=int(stats.month_total_tasks or 0),
+        month_completed_tasks=int(stats.month_completed_tasks or 0),
+        month_completion_rate=float(stats.month_completion_rate or 0.0),
+        week_total_tasks=int(stats.week_total_tasks or 0),
+        week_completed_tasks=int(stats.week_completed_tasks or 0),
+        week_completion_rate=float(stats.week_completion_rate or 0.0),
+        day_total_tasks=int(stats.day_total_tasks or 0),
+        day_completed_tasks=int(stats.day_completed_tasks or 0),
+        day_completion_rate=float(stats.day_completion_rate or 0.0),
+        category_breakdown=category_breakdown,
+        trend=trend,
+        updated_at=stats.updated_at
+    )
+
+
+async def get_productivity_stats(session: AsyncSession, user: User) -> ProductivityStatsOut:
+    """Get stored productivity stats, recalculating if needed."""
+    return await calculate_and_store_productivity_stats(session, user)
 
 
 async def adjust_stats(
@@ -758,108 +747,8 @@ async def adjust_stats(
     total_delta: int = 0,
     completed_delta: int = 0,
 ) -> None:
-    """Adjust persistent ledger totals for a user."""
-    result = await session.execute(select(ProductivityStats).where(ProductivityStats.user_id == user_id))
-    stats = result.scalar_one_or_none()
-    if not stats:
-        stats = ProductivityStats(user_id=user_id)
-        session.add(stats)
-        
-    stats.alltime_total_tasks = max(0, stats.alltime_total_tasks + total_delta)
-    stats.alltime_completed_tasks = max(0, stats.alltime_completed_tasks + completed_delta)
-    
-    stats.month_total_tasks = max(0, stats.month_total_tasks + total_delta)
-    stats.month_completed_tasks = max(0, stats.month_completed_tasks + completed_delta)
-    
-    stats.week_total_tasks = max(0, stats.week_total_tasks + total_delta)
-    stats.week_completed_tasks = max(0, stats.week_completed_tasks + completed_delta)
-    
-    stats.day_total_tasks = max(0, stats.day_total_tasks + total_delta)
-    stats.day_completed_tasks = max(0, stats.day_completed_tasks + completed_delta)
-    
-    stats.alltime_completion_rate = round((stats.alltime_completed_tasks / stats.alltime_total_tasks * 100) if stats.alltime_total_tasks else 0.0, 2)
-    stats.month_completion_rate = round((stats.month_completed_tasks / stats.month_total_tasks * 100) if stats.month_total_tasks else 0.0, 2)
-    stats.week_completion_rate = round((stats.week_completed_tasks / stats.week_total_tasks * 100) if stats.week_total_tasks else 0.0, 2)
-    stats.day_completion_rate = round((stats.day_completed_tasks / stats.day_total_tasks * 100) if stats.day_total_tasks else 0.0, 2)
-
-    # Category breakdown updates
-    if category_id:
-        cat_res = await session.execute(select(Category).where(Category.id == category_id))
-        category = cat_res.scalar_one_or_none()
-        
-        if category:
-            breakdown = []
-            if stats.category_breakdown:
-                try:
-                    breakdown = json.loads(stats.category_breakdown)
-                except:
-                    breakdown = []
-                    
-            found = False
-            for item in breakdown:
-                if item["category_id"] == category_id:
-                    item["total_tasks"] = max(0, item.get("total_tasks", 0) + total_delta)
-                    item["completed_tasks"] = max(0, item.get("completed_tasks", 0) + completed_delta)
-                    item["completion_rate"] = round((item["completed_tasks"] / item["total_tasks"] * 100) if item["total_tasks"] else 0.0, 2)
-                    item["color"] = category.color
-                    item["category_name"] = category.name
-                    found = True
-                    break
-                    
-            if not found:
-                rate = 100.0 if completed_delta > 0 else 0.0
-                breakdown.append({
-                    "category_id": category_id,
-                    "category_name": category.name,
-                    "color": category.color,
-                    "total_tasks": max(0, total_delta),
-                    "completed_tasks": max(0, completed_delta),
-                    "completion_rate": rate
-                })
-                
-            stats.category_breakdown = json.dumps(breakdown)
-    
-    await session.commit()
-
-
-async def get_productivity_stats(session: AsyncSession, user: User) -> ProductivityStatsOut:
-    """Get stored productivity stats, recalculating if needed."""
-    # Recalculate stats from scratch to ensure sync with actual data
-    stats = await calculate_and_store_productivity_stats(session, user)
-    
-    # Parse category breakdown
-    category_breakdown: list[CategoryBreakdownItem] = []
-    if stats.category_breakdown:
-        try:
-            breakdown_data = json.loads(stats.category_breakdown)
-            
-            # Re-sync category names & colors to handle recent edits
-            for item in breakdown_data:
-                cat_id = item.get("category_id")
-                if cat_id:
-                    cat_res = await session.execute(select(Category).where(Category.id == cat_id))
-                    category = cat_res.scalar_one_or_none()
-                    if category:
-                        item["category_name"] = category.name
-                        item["color"] = category.color
-                        
-            category_breakdown = [CategoryBreakdownItem(**item) for item in breakdown_data]
-        except Exception:
-            category_breakdown = []
-    
-    return ProductivityStatsOut(
-        alltime_total_tasks=int(stats.alltime_total_tasks or 0),
-        alltime_completed_tasks=int(stats.alltime_completed_tasks or 0),
-        alltime_completion_rate=float(stats.alltime_completion_rate or 0.0),
-        day_total_tasks=int(stats.day_total_tasks or 0),
-        day_completed_tasks=int(stats.day_completed_tasks or 0),
-        day_completion_rate=float(stats.day_completion_rate or 0.0),
-        week_total_tasks=int(stats.week_total_tasks or 0),
-        week_completed_tasks=int(stats.week_completed_tasks or 0),
-        week_completion_rate=float(stats.week_completion_rate or 0.0),
-        month_total_tasks=int(stats.month_total_tasks or 0),
-        month_completed_tasks=int(stats.month_completed_tasks or 0),
-        month_completion_rate=float(stats.month_completion_rate or 0.0),
-        category_breakdown=category_breakdown,
-        updated_at=stats.updated_at,
-    )
+    """Adjust persistent ledger totals for a user by recalculating from the source of truth."""
+    user_res = await session.execute(select(User).where(User.id == user_id))
+    user = user_res.scalar_one_or_none()
+    if user:
+        await calculate_and_store_productivity_stats(session, user)
