@@ -589,7 +589,7 @@ async def calculate_and_store_productivity_stats(
     session: AsyncSession,
     user: User,
 ) -> ProductivityStats:
-    """Calculate productivity stats using the TaskCompletion ledger for accuracy."""
+    """Calculate productivity stats using a hybrid approach for perfect accuracy across time."""
     now = datetime.now(timezone.utc)
     today_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
     today_end = today_start + timedelta(days=1)
@@ -601,7 +601,7 @@ async def calculate_and_store_productivity_stats(
     # === DAY stats ===
     day_completed = await _count_completions_in_period(session, user, today_start, today_end)
     
-    # Get counts once and reuse
+    # Get current live counts
     habit_count_res = await session.execute(
         select(func.count(Task.id)).where(
             Task.user_id == user.id, 
@@ -637,84 +637,73 @@ async def calculate_and_store_productivity_stats(
     # === ALL-TIME stats ===
     alltime_completed = await _count_completions_in_period(session, user, user_start)
     
-    snapshot_result = await session.execute(
-        select(func.coalesce(func.sum(DailySnapshot.total_available), 0)).where(DailySnapshot.user_id == user.id)
+    # Total = (All unique one-offs ever) + (All habit-days ever)
+    alltime_oneoff_completed_q = await session.execute(
+        select(func.count(TaskCompletion.id)).where(
+            TaskCompletion.user_id == user.id,
+            TaskCompletion.is_habit.is_(False)
+        )
     )
-    past_total = int(snapshot_result.scalar_one() or 0)
+    # One-offs = Completed + Currently Pending
+    alltime_oneoffs = int(alltime_oneoff_completed_q.scalar_one() or 0) + incomplete_oneoff_count
     
-    current_tasks_res = await session.execute(
-        select(func.count(Task.id)).where(Task.user_id == user.id, Task.is_deleted.is_(False))
+    alltime_snapshot_q = await session.execute(
+        select(func.coalesce(func.sum(DailySnapshot.total_available), 0)).where(
+            DailySnapshot.user_id == user.id
+        )
     )
-    current_total = int(current_tasks_res.scalar_one() or 0)
+    # Habit-days = past habit snapshots + today's habits
+    alltime_habits = int(alltime_snapshot_q.scalar_one() or 0) + habit_count
     
-    alltime_total = max(alltime_completed, past_total + current_total)
+    alltime_total = alltime_oneoffs + alltime_habits
     alltime_rate = round((alltime_completed / alltime_total * 100) if alltime_total else 0.0, 2)
 
     # === WEEK stats ===
     week_completed = await _count_completions_in_period(session, user, week_start)
     
+    week_oneoff_completed_q = await session.execute(
+        select(func.count(TaskCompletion.id)).where(
+            TaskCompletion.user_id == user.id,
+            TaskCompletion.is_habit.is_(False),
+            TaskCompletion.completed_at >= week_start
+        )
+    )
+    week_oneoffs = int(week_oneoff_completed_q.scalar_one() or 0) + incomplete_oneoff_count
+    
     week_snapshot_q = await session.execute(
-        select(DailySnapshot).where(
+        select(func.coalesce(func.sum(DailySnapshot.total_available), 0)).where(
             DailySnapshot.user_id == user.id,
             DailySnapshot.snapshot_date >= week_start,
             DailySnapshot.snapshot_date < today_start
         )
     )
-    snapshots = {s.snapshot_date.date(): s for s in week_snapshot_q.scalars().all()}
+    week_habits = int(week_snapshot_q.scalar_one() or 0) + habit_count
     
-    week_total = day_total
-    cursor = week_start
-    while cursor < today_start:
-        d = cursor.date()
-        if d in snapshots:
-            week_total += snapshots[d].total_available
-        else:
-            # Estimate missing history
-            habit_then_res = await session.execute(
-                select(func.count(Task.id)).where(
-                    Task.user_id == user.id, 
-                    Task.is_habit.is_(True),
-                    (Task.is_deleted.is_(False)) | (Task.deleted_at >= cursor + timedelta(days=1))
-                )
-            )
-            habit_then = int(habit_then_res.scalar_one() or 0)
-            completions_then = await _count_completions_in_period(session, user, cursor, cursor + timedelta(days=1))
-            week_total += habit_then + incomplete_oneoff_count + completions_then
-        cursor += timedelta(days=1)
-        
+    week_total = week_oneoffs + week_habits
     week_rate = round((week_completed / week_total * 100) if week_total else 0.0, 2)
 
     # === MONTH stats ===
     month_completed = await _count_completions_in_period(session, user, month_start)
     
+    month_oneoff_completed_q = await session.execute(
+        select(func.count(TaskCompletion.id)).where(
+            TaskCompletion.user_id == user.id,
+            TaskCompletion.is_habit.is_(False),
+            TaskCompletion.completed_at >= month_start
+        )
+    )
+    month_oneoffs = int(month_oneoff_completed_q.scalar_one() or 0) + incomplete_oneoff_count
+    
     month_snapshot_q = await session.execute(
-        select(DailySnapshot).where(
+        select(func.coalesce(func.sum(DailySnapshot.total_available), 0)).where(
             DailySnapshot.user_id == user.id,
             DailySnapshot.snapshot_date >= month_start,
             DailySnapshot.snapshot_date < today_start
         )
     )
-    m_snapshots = {s.snapshot_date.date(): s for s in month_snapshot_q.scalars().all()}
+    month_habits = int(month_snapshot_q.scalar_one() or 0) + habit_count
     
-    month_total = day_total
-    m_cursor = month_start
-    while m_cursor < today_start:
-        d = m_cursor.date()
-        if d in m_snapshots:
-            month_total += m_snapshots[d].total_available
-        else:
-            habit_then_res = await session.execute(
-                select(func.count(Task.id)).where(
-                    Task.user_id == user.id, 
-                    Task.is_habit.is_(True),
-                    (Task.is_deleted.is_(False)) | (Task.deleted_at >= m_cursor + timedelta(days=1))
-                )
-            )
-            habit_then = int(habit_then_res.scalar_one() or 0)
-            completions_then = await _count_completions_in_period(session, user, m_cursor, m_cursor + timedelta(days=1))
-            month_total += habit_then + incomplete_oneoff_count + completions_then
-        m_cursor += timedelta(days=1)
-
+    month_total = month_oneoffs + month_habits
     month_rate = round((month_completed / month_total * 100) if month_total else 0.0, 2)
 
     # Category breakdown
