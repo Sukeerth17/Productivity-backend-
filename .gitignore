@@ -3,3 +3,15 @@ __pycache__/
 *.pyc
 *.db
 .env
+*.png
+backfill_ledger.py
+debug_cats.py
+debug_db.py
+debug_tasks.py
+fix_200.py
+migrate_db.py
+patch_db.py
+refactor_stats.py
+reset_user.py
+test_list.py
+update_user_date.py
