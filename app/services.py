@@ -323,41 +323,38 @@ async def dashboard_stats(session: AsyncSession, user: User) -> dict[str, float 
 
 
 async def history_summary(session: AsyncSession, user: User) -> dict[str, datetime | float | int]:
-    created_filters = [Task.user_id == user.id, Task.created_at >= user.created_at]
-    total_tasks = int((await session.execute(select(func.count(Task.id)).where(*created_filters))).scalar_one())
-    completed_tasks = int(
-        (
-            await session.execute(
-                select(func.count(Task.id)).where(*created_filters, Task.completed.is_(True))
-            )
-        ).scalar_one()
-    )
-
-    completion_date_expr = func.date(func.coalesce(Task.completed_at, Task.created_at))
+    # Use the ProductivityStats table which we already keep synced
+    stats = await calculate_and_store_productivity_stats(session, user)
+    
+    # Calculate streak from ledger
+    completion_date_expr = func.date(TaskCompletion.completed_at)
     streak_result = await session.execute(
         select(completion_date_expr)
-        .where(Task.user_id == user.id, Task.completed.is_(True))
+        .where(TaskCompletion.user_id == user.id)
         .group_by(completion_date_expr)
     )
     completed_days = {
-        date.fromisoformat(str(value))
-        for value in streak_result.scalars().all()
+        value for value in streak_result.scalars().all()
         if value
     }
 
     streak = 0
     cursor = datetime.now(timezone.utc).date()
-    while cursor in completed_days:
-        streak += 1
-        cursor -= timedelta(days=1)
+    # Check if they did something today or yesterday to continue streak
+    if cursor in completed_days or (cursor - timedelta(days=1)) in completed_days:
+        if cursor not in completed_days:
+            cursor -= timedelta(days=1)
+        while cursor in completed_days:
+            streak += 1
+            cursor -= timedelta(days=1)
 
     return {
         "started_at": user.created_at,
-        "since_start_total_tasks": total_tasks,
-        "since_start_completed_tasks": completed_tasks,
-        "completion_rate": round((completed_tasks / total_tasks * 100) if total_tasks else 0.0, 2),
+        "since_start_total_tasks": int(stats.alltime_total_tasks),
+        "since_start_completed_tasks": int(stats.alltime_completed_tasks),
+        "completion_rate": float(stats.alltime_completion_rate),
         "current_streak": streak,
-        "total_momentum": completed_tasks * 5,
+        "total_momentum": int(stats.alltime_completed_tasks * 10), # 10 momentum per task
     }
 
 
