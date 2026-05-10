@@ -35,11 +35,17 @@ async def _write_daily_snapshots() -> None:
 
             # Count today's available habits ONLY: 
             # - Active habits + habits deleted specifically TODAY
+            # - Must be active on today's weekday
+            today_weekday = str(today_start.date().weekday())
             habit_count = await session.execute(
                 select(func.count(Task.id)).where(
                     Task.user_id == user.id, 
                     Task.is_habit.is_(True),
-                    (Task.is_deleted.is_(False)) | (Task.deleted_at >= today_start)
+                    (Task.is_deleted.is_(False)) | (Task.deleted_at >= today_start),
+                    or_(
+                        Task.habit_days.is_(None),
+                        Task.habit_days.contains(today_weekday)
+                    )
                 )
             )
             total_available = int(habit_count.scalar_one() or 0)
@@ -87,7 +93,7 @@ async def cleanup_old_oneoff_tasks() -> None:
 
 
 async def reset_habit_tasks() -> None:
-    """Write daily snapshots FIRST, then reset all habit tasks to incomplete."""
+    """Write daily snapshots FIRST, then reset habit tasks that are active today."""
     # Write snapshots BEFORE resetting (captures today's state accurately)
     await _write_daily_snapshots()
 
@@ -105,13 +111,23 @@ async def reset_habit_tasks() -> None:
         result = await session.execute(stmt)
         tasks = result.scalars().all()
 
-        # Reset them to incomplete
+        from datetime import date as _date
+        today_weekday = _date.today().weekday()  # 0=Mon..6=Sun
+
+        # Reset only habits active today
+        reset_count = 0
         for task in tasks:
+            # Check if habit is active today
+            if task.habit_days:
+                active_days = {int(d) for d in task.habit_days.split(",") if d.strip().isdigit()}
+                if today_weekday not in active_days:
+                    continue  # Skip: not active today
             task.completed = False
             task.completed_at = None
+            reset_count += 1
 
         await session.commit()
-        print(f"[SCHEDULER] Reset {len(tasks)} habit tasks at {datetime.now(timezone.utc)}")
+        print(f"[SCHEDULER] Reset {reset_count} habit tasks at {datetime.now(timezone.utc)}")
 
 
 def start_scheduler() -> AsyncIOScheduler:

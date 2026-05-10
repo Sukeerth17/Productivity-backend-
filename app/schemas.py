@@ -62,6 +62,7 @@ class TaskCreate(BaseModel):
     due_time: str | None = Field(default=None, max_length=12)
     subtasks: list[SubTaskCreate] = Field(default_factory=list)
     start_date: date | None = None
+    habit_days: list[int] | None = Field(default=None, description="Days habit is active: 0=Mon..6=Sun. null=daily.")
 
     @field_validator("due_time")
     @classmethod
@@ -82,6 +83,7 @@ class TaskUpdate(BaseModel):
     priority: Priority | None = None
     due_time: str | None = Field(default=None, max_length=12)
     start_date: date | None = None
+    habit_days: list[int] | None = Field(default=None, description="Days habit is active: 0=Mon..6=Sun. null=daily.")
 
 
 class TaskOut(BaseModel):
@@ -96,10 +98,20 @@ class TaskOut(BaseModel):
     priority: Priority | None
     due_time: str | None
     start_date: date | None
+    habit_days: list[int] | None
     created_at: datetime
     completed_at: datetime | None
     updated_at: datetime
     subtasks: list[SubTaskOut]
+
+    @field_validator("habit_days", mode="before")
+    @classmethod
+    def parse_habit_days(cls, v: Any) -> list[int] | None:
+        if v is None or v == "":
+            return None
+        if isinstance(v, str):
+            return [int(d) for d in v.split(",") if d.strip().isdigit()]
+        return v
 
 
 class PaginatedTasks(BaseModel):

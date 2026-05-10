@@ -113,6 +113,9 @@ class Task(Base):
     # Task scheduling: hide task until this date (inclusive)
     start_date: Mapped[date | None] = mapped_column(Date, nullable=True, index=True)
 
+    # Habit scheduling: comma-separated day numbers (0=Mon..6=Sun). NULL/empty = daily.
+    habit_days: Mapped[str | None] = mapped_column(String(20), nullable=True)
+
     user: Mapped[User | None] = relationship(back_populates="tasks")
     category: Mapped[Category] = relationship(back_populates="tasks", lazy="joined")
     subtasks: Mapped[list[SubTask]] = relationship(

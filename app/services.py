@@ -29,6 +29,22 @@ def _normalized_name(name: str) -> str:
     return name.strip()
 
 
+def _habit_days_to_str(days: list[int] | None) -> str | None:
+    """Convert a list like [0,2,4] to '0,2,4' for DB storage. None = daily."""
+    if days is None or len(days) == 0 or len(days) == 7:
+        return None  # daily
+    return ",".join(str(d) for d in sorted(set(days)))
+
+
+def _is_habit_active_today(habit_days_str: str | None) -> bool:
+    """Check if a habit with the given habit_days string is active today."""
+    if not habit_days_str:
+        return True  # daily
+    today_weekday = date.today().weekday()  # 0=Mon..6=Sun
+    active_days = {int(d) for d in habit_days_str.split(",") if d.strip().isdigit()}
+    return today_weekday in active_days
+
+
 async def _claim_orphaned_data_for_single_user(session: AsyncSession, user: User) -> None:
     user_count = int((await session.execute(select(func.count(User.id)))).scalar_one())
     if user_count != 1:
@@ -130,6 +146,7 @@ async def create_task(session: AsyncSession, user: User, payload: TaskCreate) ->
         priority=payload.priority,
         due_time=payload.due_time,
         start_date=payload.start_date,
+        habit_days=_habit_days_to_str(payload.habit_days) if payload.is_habit else None,
     )
     for idx, sub in enumerate(payload.subtasks):
         task.subtasks.append(SubTask(title=sub.title.strip(), completed=sub.completed, position=idx))
@@ -167,7 +184,14 @@ async def list_tasks(
     filters = [Task.user_id == user.id, Task.is_deleted.is_(False)]
     # Only show tasks whose start_date has arrived (or has no start_date)
     today = date.today()
+    today_weekday = str(today.weekday())  # 0=Mon..6=Sun
     filters.append(or_(Task.start_date.is_(None), Task.start_date <= today))
+    # Only show habits that are active today (habit_days is null=daily, or contains today's weekday)
+    filters.append(or_(
+        Task.is_habit.is_(False),  # non-habits always show
+        Task.habit_days.is_(None),  # daily habits always show
+        Task.habit_days.contains(today_weekday),  # specific-day habits show if today matches
+    ))
     if category_id:
         filters.append(Task.category_id == category_id)
     if completed is not None:
@@ -231,6 +255,8 @@ async def update_task(session: AsyncSession, user: User, task: Task, payload: Ta
             )
     if "priority" in data:
         task.priority = data.pop("priority")
+    if "habit_days" in data:
+        task.habit_days = _habit_days_to_str(data.pop("habit_days"))
         
     for key, value in data.items():
         setattr(task, key, value)
@@ -320,12 +346,15 @@ async def dashboard_stats(session: AsyncSession, user: User) -> dict[str, float 
     now = datetime.now(timezone.utc)
     today_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
     today_date = now.date()
+    today_weekday = str(today_date.weekday())
     
     filters = [
         Task.user_id == user.id,
         Task.is_deleted.is_(False),
         # Exclude tasks that haven't started yet
         or_(Task.start_date.is_(None), Task.start_date <= today_date),
+        # Exclude habits not active today
+        or_(Task.is_habit.is_(False), Task.habit_days.is_(None), Task.habit_days.contains(today_weekday)),
     ]
     
     # Active tasks = Pending tasks (whose start_date has arrived)
@@ -641,6 +670,15 @@ async def calculate_and_store_productivity_stats(
         # Exclude tasks that haven't started yet as of start_date
         avail_filters.append(or_(Task.start_date.is_(None), Task.start_date <= start_date.date()))
         
+        # Habit days filtering: if it's a single day (Trend or Today), filter by that day's weekday
+        if end_date and (end_date - start_date).days == 1:
+            today_weekday = str(start_date.date().weekday())
+            avail_filters.append(or_(
+                Task.is_habit.is_(False),
+                Task.habit_days.is_(None),
+                Task.habit_days.contains(today_weekday)
+            ))
+            
         available_q = await session.execute(select(func.count(Task.id)).where(*avail_filters))
         available = available_q.scalar() or 0
         return available, completed

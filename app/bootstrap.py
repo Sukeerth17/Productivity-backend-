@@ -87,6 +87,11 @@ async def _ensure_extra_columns(conn: AsyncConnection) -> None:
         await conn.execute(text("ALTER TABLE tasks ADD COLUMN start_date DATE"))
         await conn.execute(text("CREATE INDEX IF NOT EXISTS ix_tasks_start_date ON tasks (start_date)"))
 
+    # Ensure tasks table has habit_days
+    has_habit_days = await conn.run_sync(lambda sync_conn: _has_column(sync_conn, "tasks", "habit_days"))
+    if not has_habit_days:
+        await conn.execute(text("ALTER TABLE tasks ADD COLUMN habit_days VARCHAR(20)"))
+
 
 async def prepare_database(engine: AsyncEngine) -> None:
     async with engine.begin() as conn:
