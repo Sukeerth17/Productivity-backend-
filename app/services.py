@@ -653,7 +653,7 @@ async def calculate_and_store_productivity_stats(
     week_start = today_start - timedelta(days=now.weekday())
     month_start = today_start.replace(day=1)
 
-    user_start = user.created_at if user.created_at.tzinfo else user.created_at.replace(tzinfo=timezone.utc)
+    user_start = (user.created_at if user.created_at.tzinfo else user.created_at.replace(tzinfo=timezone.utc)).replace(hour=0, minute=0, second=0, microsecond=0)
     
     async def get_stats_for_period(start_date: datetime, end_date: datetime | None = None):
         target_end = end_date or datetime.now(timezone.utc)
