@@ -12,8 +12,15 @@ from .routers import auth, categories, stats, tasks
 from .scheduler import start_scheduler
 
 
+import logging
+
+# Configure logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
+    logger.info(f"Allowed Origins: {settings.allowed_origins}")
     await prepare_database(engine)
     # Start background scheduler
     scheduler = start_scheduler()
@@ -29,13 +36,23 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
+# More permissive CORS for troubleshooting
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=settings.allowed_origins,
-    allow_credentials=True,
+    allow_origins=settings.allowed_origins or ["*"],
+    allow_credentials=True if settings.allowed_origins else False,
     allow_methods=["*"],
     allow_headers=["*"],
+    expose_headers=["*"],
 )
+
+from fastapi import Request
+@app.middleware("http")
+async def db_session_middleware(request: Request, call_next):
+    if request.method == "OPTIONS":
+        logger.info(f"Preflight request for {request.url.path} from {request.headers.get('origin')}")
+    response = await call_next(request)
+    return response
 
 
 @app.get("/health")
