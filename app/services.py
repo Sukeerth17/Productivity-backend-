@@ -367,7 +367,7 @@ async def dashboard_stats(session: AsyncSession, user: User) -> dict[str, float 
     )
     completed = int(completed_today_q.scalar_one())
     
-    # Total for today = Active + Completed Today
+    # Total for today = Pending (active) + Completed Today
     total = active + completed
     
     categories_q = await session.execute(select(func.count(Category.id)).where(Category.user_id == user.id))
@@ -656,32 +656,34 @@ async def calculate_and_store_productivity_stats(
     user_start = user.created_at if user.created_at.tzinfo else user.created_at.replace(tzinfo=timezone.utc)
     
     async def get_stats_for_period(start_date: datetime, end_date: datetime | None = None):
-        filters = [TaskCompletion.user_id == user.id, TaskCompletion.completed_at >= start_date]
-        if end_date:
-            filters.append(TaskCompletion.completed_at < end_date)
-        completed_q = await session.execute(select(func.count(TaskCompletion.id)).where(*filters))
-        completed = completed_q.scalar() or 0
-
-        avail_filters = [Task.user_id == user.id]
-        if end_date:
-            avail_filters.append(Task.created_at < end_date)
-        avail_filters.append(or_(Task.is_deleted.is_(False), Task.deleted_at >= start_date))
-        avail_filters.append(or_(Task.is_habit.is_(True), Task.completed.is_(False), Task.completed_at >= start_date))
-        # Exclude tasks that haven't started yet as of start_date
-        avail_filters.append(or_(Task.start_date.is_(None), Task.start_date <= start_date.date()))
+        target_end = end_date or datetime.now(timezone.utc)
+        today_start = datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0)
         
-        # Habit days filtering: if it's a single day (Trend or Today), filter by that day's weekday
-        if end_date and (end_date - start_date).days == 1:
-            today_weekday = str(start_date.date().weekday())
-            avail_filters.append(or_(
-                Task.is_habit.is_(False),
-                Task.habit_days.is_(None),
-                Task.habit_days.contains(today_weekday)
-            ))
+        total_avail = 0
+        total_comp = 0
+        
+        # 1. Get stats from snapshots for previous days
+        snapshot_end = min(target_end, today_start)
+        if start_date < snapshot_end:
+            snapshots_q = await session.execute(
+                select(func.sum(DailySnapshot.total_available), func.sum(DailySnapshot.total_completed))
+                .where(
+                    DailySnapshot.user_id == user.id,
+                    DailySnapshot.snapshot_date >= start_date,
+                    DailySnapshot.snapshot_date < snapshot_end
+                )
+            )
+            snap_avail, snap_comp = snapshots_q.first() or (0, 0)
+            total_avail += int(snap_avail or 0)
+            total_comp += int(snap_comp or 0)
             
-        available_q = await session.execute(select(func.count(Task.id)).where(*avail_filters))
-        available = available_q.scalar() or 0
-        return available, completed
+        # 2. Get live stats for "today" if the period includes today
+        if start_date <= today_start < target_end:
+            live = await dashboard_stats(session, user)
+            total_avail += int(live["total_tasks"])
+            total_comp += int(live["completed_tasks"])
+            
+        return total_avail, total_comp
 
     # === DAY stats ===
     day_total, day_completed = await get_stats_for_period(today_start, today_end)

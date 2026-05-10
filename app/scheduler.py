@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import datetime, timedelta, timezone
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
-from sqlalchemy import and_, delete, func, select
+from sqlalchemy import and_, delete, func, select, or_
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import sessionmaker
 
@@ -33,28 +33,42 @@ async def _write_daily_snapshots() -> None:
             if existing.scalar_one_or_none():
                 continue
 
-            # Count today's available habits ONLY: 
-            # - Active habits + habits deleted specifically TODAY
-            # - Must be active on today's weekday
+            # Count today's available tasks: 
+            # 1. Habits active today (active weekday or daily)
+            # 2. One-off tasks that were active today (not completed before today, not deleted before today)
             today_weekday = str(today_start.date().weekday())
-            habit_count = await session.execute(
-                select(func.count(Task.id)).where(
-                    Task.user_id == user.id, 
-                    Task.is_habit.is_(True),
-                    (Task.is_deleted.is_(False)) | (Task.deleted_at >= today_start),
-                    or_(
-                        Task.habit_days.is_(None),
-                        Task.habit_days.contains(today_weekday)
-                    )
-                )
+            
+            # Habits
+            habit_q = select(func.count(Task.id)).where(
+                Task.user_id == user.id, 
+                Task.is_habit.is_(True),
+                (Task.is_deleted.is_(False)) | (Task.deleted_at >= today_start),
+                or_(
+                    Task.habit_days.is_(None),
+                    Task.habit_days.contains(today_weekday)
+                ),
+                or_(Task.start_date.is_(None), Task.start_date <= today_start.date())
             )
-            total_available = int(habit_count.scalar_one() or 0)
+            
+            # One-offs (must have been created before today_end and not 'finished' before today_start)
+            # 'Finished' means completed OR deleted.
+            oneoff_q = select(func.count(Task.id)).where(
+                Task.user_id == user.id,
+                Task.is_habit.is_(False),
+                Task.created_at < today_end,
+                or_(Task.completed.is_(False), Task.completed_at >= today_start),
+                or_(Task.is_deleted.is_(False), Task.deleted_at >= today_start),
+                or_(Task.start_date.is_(None), Task.start_date <= today_start.date())
+            )
 
-            # Count today's habit completions from TaskCompletion ledger
+            total_available_habits = int((await session.execute(habit_q)).scalar_one() or 0)
+            total_available_oneoffs = int((await session.execute(oneoff_q)).scalar_one() or 0)
+            total_available = total_available_habits + total_available_oneoffs
+
+            # Count today's completions from TaskCompletion ledger (Habits AND One-offs)
             completed_count = await session.execute(
                 select(func.count(TaskCompletion.id)).where(
                     TaskCompletion.user_id == user.id,
-                    TaskCompletion.is_habit.is_(True),
                     TaskCompletion.completed_at >= today_start,
                     TaskCompletion.completed_at < today_end,
                 )
