@@ -1,9 +1,9 @@
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from uuid import uuid4
 
-from sqlalchemy import Boolean, DateTime, ForeignKey, Index, Integer, String, Text
+from sqlalchemy import Boolean, Date, DateTime, ForeignKey, Index, Integer, String, Text
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
 
@@ -109,6 +109,9 @@ class Task(Base):
     # Soft deletion for history preservation
     is_deleted: Mapped[bool] = mapped_column(Boolean, default=False, index=True)
     deleted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+    # Task scheduling: hide task until this date (inclusive)
+    start_date: Mapped[date | None] = mapped_column(Date, nullable=True, index=True)
 
     user: Mapped[User | None] = relationship(back_populates="tasks")
     category: Mapped[Category] = relationship(back_populates="tasks", lazy="joined")

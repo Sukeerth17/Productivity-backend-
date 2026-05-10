@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import date, datetime
 from typing import Literal, Any
 
 from pydantic import BaseModel, ConfigDict, EmailStr, Field, field_validator
@@ -61,6 +61,7 @@ class TaskCreate(BaseModel):
     priority: Priority | None = None
     due_time: str | None = Field(default=None, max_length=12)
     subtasks: list[SubTaskCreate] = Field(default_factory=list)
+    start_date: date | None = None
 
     @field_validator("due_time")
     @classmethod
@@ -80,6 +81,7 @@ class TaskUpdate(BaseModel):
     is_habit: bool | None = None
     priority: Priority | None = None
     due_time: str | None = Field(default=None, max_length=12)
+    start_date: date | None = None
 
 
 class TaskOut(BaseModel):
@@ -93,6 +95,7 @@ class TaskOut(BaseModel):
     is_habit: bool
     priority: Priority | None
     due_time: str | None
+    start_date: date | None
     created_at: datetime
     completed_at: datetime | None
     updated_at: datetime

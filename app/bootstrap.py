@@ -81,6 +81,12 @@ async def _ensure_extra_columns(conn: AsyncConnection) -> None:
         await conn.execute(text(f"ALTER TABLE tasks ADD COLUMN deleted_at {timestamp_type}"))
         await conn.execute(text("CREATE INDEX IF NOT EXISTS ix_tasks_is_deleted ON tasks (is_deleted)"))
 
+    # Ensure tasks table has start_date
+    has_start_date = await conn.run_sync(lambda sync_conn: _has_column(sync_conn, "tasks", "start_date"))
+    if not has_start_date:
+        await conn.execute(text("ALTER TABLE tasks ADD COLUMN start_date DATE"))
+        await conn.execute(text("CREATE INDEX IF NOT EXISTS ix_tasks_start_date ON tasks (start_date)"))
+
 
 async def prepare_database(engine: AsyncEngine) -> None:
     async with engine.begin() as conn:

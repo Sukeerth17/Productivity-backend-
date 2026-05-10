@@ -129,6 +129,7 @@ async def create_task(session: AsyncSession, user: User, payload: TaskCreate) ->
         is_habit=payload.is_habit,
         priority=payload.priority,
         due_time=payload.due_time,
+        start_date=payload.start_date,
     )
     for idx, sub in enumerate(payload.subtasks):
         task.subtasks.append(SubTask(title=sub.title.strip(), completed=sub.completed, position=idx))
@@ -164,6 +165,9 @@ async def list_tasks(
     offset: int,
 ) -> tuple[list[Task], int]:
     filters = [Task.user_id == user.id, Task.is_deleted.is_(False)]
+    # Only show tasks whose start_date has arrived (or has no start_date)
+    today = date.today()
+    filters.append(or_(Task.start_date.is_(None), Task.start_date <= today))
     if category_id:
         filters.append(Task.category_id == category_id)
     if completed is not None:
@@ -315,10 +319,16 @@ async def dashboard_stats(session: AsyncSession, user: User) -> dict[str, float 
     # Define "today" in UTC
     now = datetime.now(timezone.utc)
     today_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+    today_date = now.date()
     
-    filters = [Task.user_id == user.id, Task.is_deleted.is_(False)]
+    filters = [
+        Task.user_id == user.id,
+        Task.is_deleted.is_(False),
+        # Exclude tasks that haven't started yet
+        or_(Task.start_date.is_(None), Task.start_date <= today_date),
+    ]
     
-    # Active tasks = Pending tasks
+    # Active tasks = Pending tasks (whose start_date has arrived)
     active_q = await session.execute(select(func.count(Task.id)).where(*filters, Task.completed.is_(False)))
     active = int(active_q.scalar_one())
     
@@ -628,6 +638,8 @@ async def calculate_and_store_productivity_stats(
             avail_filters.append(Task.created_at < end_date)
         avail_filters.append(or_(Task.is_deleted.is_(False), Task.deleted_at >= start_date))
         avail_filters.append(or_(Task.is_habit.is_(True), Task.completed.is_(False), Task.completed_at >= start_date))
+        # Exclude tasks that haven't started yet as of start_date
+        avail_filters.append(or_(Task.start_date.is_(None), Task.start_date <= start_date.date()))
         
         available_q = await session.execute(select(func.count(Task.id)).where(*avail_filters))
         available = available_q.scalar() or 0
