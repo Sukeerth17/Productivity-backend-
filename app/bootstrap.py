@@ -45,12 +45,16 @@ async def _ensure_extra_columns(conn: AsyncConnection) -> None:
     # Ensure task_completions has category_id and task_id can be null
     has_cat_id = await conn.run_sync(lambda sync_conn: _has_column(sync_conn, "task_completions", "category_id"))
     if not has_cat_id:
-        if is_sqlite:
-            # SQLite supports adding column with simple FK in one go, but not ADD CONSTRAINT
-            await conn.execute(text("ALTER TABLE task_completions ADD COLUMN category_id VARCHAR(36) REFERENCES categories(id) ON DELETE SET NULL"))
-        else:
-            await conn.execute(text("ALTER TABLE task_completions ADD COLUMN category_id VARCHAR(36)"))
-            await conn.execute(text("ALTER TABLE task_completions ADD CONSTRAINT fk_task_completions_category FOREIGN KEY (category_id) REFERENCES categories(id) ON DELETE SET NULL"))
+        try:
+            async with conn.begin_nested():
+                if is_sqlite:
+                    # SQLite supports adding column with simple FK in one go, but not ADD CONSTRAINT
+                    await conn.execute(text("ALTER TABLE task_completions ADD COLUMN category_id VARCHAR(36) REFERENCES categories(id) ON DELETE SET NULL"))
+                else:
+                    await conn.execute(text("ALTER TABLE task_completions ADD COLUMN category_id VARCHAR(36)"))
+                    await conn.execute(text("ALTER TABLE task_completions ADD CONSTRAINT fk_task_completions_category FOREIGN KEY (category_id) REFERENCES categories(id) ON DELETE SET NULL"))
+        except Exception:
+            pass
 
     # SQLite doesn't support ALTER COLUMN or DROP CONSTRAINT easily.
     # For a new DB, create_all already handles the correct schema.
@@ -58,39 +62,54 @@ async def _ensure_extra_columns(conn: AsyncConnection) -> None:
     if not is_sqlite:
         # Ensure task_completions task_id is nullable (it was previously non-nullable in some versions)
         try:
-            await conn.execute(text("ALTER TABLE task_completions ALTER COLUMN task_id DROP NOT NULL"))
+            async with conn.begin_nested():
+                await conn.execute(text("ALTER TABLE task_completions ALTER COLUMN task_id DROP NOT NULL"))
         except Exception:
             pass
         
         # Ensure task_completions task_id has SET NULL instead of CASCADE
         try:
-            await conn.execute(text("ALTER TABLE task_completions DROP CONSTRAINT task_completions_task_id_fkey"))
+            async with conn.begin_nested():
+                await conn.execute(text("ALTER TABLE task_completions DROP CONSTRAINT task_completions_task_id_fkey"))
         except Exception:
             pass
         try:
-            await conn.execute(text("ALTER TABLE task_completions ADD CONSTRAINT task_completions_task_id_fkey FOREIGN KEY (task_id) REFERENCES tasks(id) ON DELETE SET NULL"))
+            async with conn.begin_nested():
+                await conn.execute(text("ALTER TABLE task_completions ADD CONSTRAINT task_completions_task_id_fkey FOREIGN KEY (task_id) REFERENCES tasks(id) ON DELETE SET NULL"))
         except Exception:
             pass
 
     # Ensure tasks table has is_deleted and deleted_at
     has_is_deleted = await conn.run_sync(lambda sync_conn: _has_column(sync_conn, "tasks", "is_deleted"))
     if not has_is_deleted:
-        await conn.execute(text("ALTER TABLE tasks ADD COLUMN is_deleted BOOLEAN DEFAULT FALSE"))
-        
-        timestamp_type = "DATETIME" if is_sqlite else "TIMESTAMP WITH TIME ZONE"
-        await conn.execute(text(f"ALTER TABLE tasks ADD COLUMN deleted_at {timestamp_type}"))
-        await conn.execute(text("CREATE INDEX IF NOT EXISTS ix_tasks_is_deleted ON tasks (is_deleted)"))
+        try:
+            async with conn.begin_nested():
+                await conn.execute(text("ALTER TABLE tasks ADD COLUMN is_deleted BOOLEAN DEFAULT FALSE"))
+                
+                timestamp_type = "DATETIME" if is_sqlite else "TIMESTAMP WITH TIME ZONE"
+                await conn.execute(text(f"ALTER TABLE tasks ADD COLUMN deleted_at {timestamp_type}"))
+                await conn.execute(text("CREATE INDEX IF NOT EXISTS ix_tasks_is_deleted ON tasks (is_deleted)"))
+        except Exception:
+            pass
 
     # Ensure tasks table has start_date
     has_start_date = await conn.run_sync(lambda sync_conn: _has_column(sync_conn, "tasks", "start_date"))
     if not has_start_date:
-        await conn.execute(text("ALTER TABLE tasks ADD COLUMN start_date DATE"))
-        await conn.execute(text("CREATE INDEX IF NOT EXISTS ix_tasks_start_date ON tasks (start_date)"))
+        try:
+            async with conn.begin_nested():
+                await conn.execute(text("ALTER TABLE tasks ADD COLUMN start_date DATE"))
+                await conn.execute(text("CREATE INDEX IF NOT EXISTS ix_tasks_start_date ON tasks (start_date)"))
+        except Exception:
+            pass
 
     # Ensure tasks table has habit_days
     has_habit_days = await conn.run_sync(lambda sync_conn: _has_column(sync_conn, "tasks", "habit_days"))
     if not has_habit_days:
-        await conn.execute(text("ALTER TABLE tasks ADD COLUMN habit_days VARCHAR(20)"))
+        try:
+            async with conn.begin_nested():
+                await conn.execute(text("ALTER TABLE tasks ADD COLUMN habit_days VARCHAR(20)"))
+        except Exception:
+            pass
 
 
 async def prepare_database(engine: AsyncEngine) -> None:

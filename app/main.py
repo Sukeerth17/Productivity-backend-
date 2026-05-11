@@ -22,8 +22,18 @@ logger = logging.getLogger(__name__)
 async def lifespan(_app: FastAPI):
     logger.info(f"Allowed Origins: {settings.allowed_origins}")
     await prepare_database(engine)
+    
     # Start background scheduler
     scheduler = start_scheduler()
+    
+    # Run a catch-up reset on startup in case the server was down at midnight
+    try:
+        from .scheduler import reset_habit_tasks
+        logger.info("Running startup habit reset catch-up...")
+        await reset_habit_tasks()
+    except Exception as e:
+        logger.error(f"Failed to run startup habit reset: {e}")
+        
     yield
     # Shutdown scheduler
     scheduler.shutdown()

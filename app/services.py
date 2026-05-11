@@ -40,7 +40,7 @@ def _is_habit_active_today(habit_days_str: str | None) -> bool:
     """Check if a habit with the given habit_days string is active today."""
     if not habit_days_str:
         return True  # daily
-    today_weekday = date.today().weekday()  # 0=Mon..6=Sun
+    today_weekday = datetime.now(timezone.utc).weekday()  # 0=Mon..6=Sun
     active_days = {int(d) for d in habit_days_str.split(",") if d.strip().isdigit()}
     return today_weekday in active_days
 
@@ -183,7 +183,8 @@ async def list_tasks(
 ) -> tuple[list[Task], int]:
     filters = [Task.user_id == user.id, Task.is_deleted.is_(False)]
     # Only show tasks whose start_date has arrived (or has no start_date)
-    today = date.today()
+    now_utc = datetime.now(timezone.utc)
+    today = now_utc.date()
     today_weekday = str(today.weekday())  # 0=Mon..6=Sun
     filters.append(or_(Task.start_date.is_(None), Task.start_date <= today))
     # Only show habits that are active today (habit_days is null=daily, or contains today's weekday)

@@ -4,10 +4,17 @@ __pycache__/
 *.db
 .env
 *.png
+.DS_Store
+
+# Debug and Maintenance scripts
 backfill_ledger.py
 debug_cats.py
 debug_db.py
 debug_tasks.py
+debug_water_plants.py
+check_task_time.py
+manual_reset.py
+check_all_habits.py
 fix_200.py
 migrate_db.py
 patch_db.py
