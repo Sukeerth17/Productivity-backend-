@@ -1,61 +1,64 @@
-# Productvity FastAPI Backend
+# Momentum Builder Backend
 
-High-performance FastAPI backend for categories, tasks, and subtasks.
+A high-performance, asynchronous FastAPI backend powering the Momentum Builder productivity suite.
 
-## Performance defaults
+## 🚀 Key Features
 
-- Async FastAPI + async SQLAlchemy (`aiosqlite` for local dev, `asyncpg` for Postgres/Supabase).
-- SQLite WAL mode + tuned PRAGMAs for better read/write concurrency.
-- Indexed columns for common filters (`category_id`, `completed`, `priority`, `created_at`).
-- Pagination on task listing endpoints.
-- `selectinload` eager loading for subtasks to avoid N+1 query overhead.
+- **Asynchronous Architecture**: Built with FastAPI and `sqlalchemy[asyncio]` for maximum throughput.
+- **Smart Task Management**: Support for categories, tasks, and nested subtasks with priority levels.
+- **Habit Scheduling**: Advanced logic for habit-based tasks with configurable active days (e.g., Mon/Wed/Fri).
+- **Insightful Analytics**: Dashboard endpoints providing completion rates, productivity trends, and historical statistics.
+- **Robust Authentication**: Secure JWT-based user authentication and registration.
+- **Optimized Persistence**: SQLite WAL mode for local development and PostgreSQL support for production (Supabase).
+- **Eager Loading**: Optimized database queries using `selectinload` to eliminate N+1 issues.
 
-## Quick start
+## 🛠 Tech Stack
 
+- **Framework**: FastAPI
+- **Database**: SQLAlchemy 2.0 (Async), Pydantic v2
+- **Migrations**: Alembic
+- **Environment**: Python 3.10+
+
+## 🚦 Quick Start
+
+### 1. Clone & Setup Environment
 ```bash
-cd backend
 python3 -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
 cp .env.example .env
+```
+
+### 2. Run Database Migrations
+```bash
+alembic upgrade head
+```
+
+### 3. Start the Server
+```bash
 uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
 ```
 
-Open API docs: `http://localhost:8000/docs`
+Access the interactive API documentation at: [http://localhost:8000/docs](http://localhost:8000/docs)
 
-## Deploy (Render + Supabase)
+## 🌐 Deployment (Render + Supabase)
 
-1. Create a Supabase project and copy its connection string.
-2. In Render, create a new Web Service from this repository (`backend`).
-3. Build command: `pip install -r requirements.txt`
-4. Start command: `uvicorn app.main:app --host 0.0.0.0 --port $PORT`
-5. Set environment variables in Render:
-   - `DATABASE_URL` = your Supabase Postgres URL (`postgresql://...?...sslmode=require`)
-   - `ALLOWED_ORIGINS` = your Vercel frontend URL (comma-separated if multiple)
-   - `DEBUG=false`
-   - Optional: `APP_NAME`, `DEFAULT_PAGE_SIZE`, `MAX_PAGE_SIZE`
+1. **Database**: Create a Supabase PostgreSQL instance.
+2. **Web Service**: Create a new Web Service on Render from this repository.
+3. **Configuration**:
+   - **Build Command**: `pip install -r requirements.txt`
+   - **Start Command**: `uvicorn app.main:app --host 0.0.0.0 --port $PORT`
+   - **Environment Variables**:
+     - `DATABASE_URL`: Your Supabase connection string.
+     - `ALLOWED_ORIGINS`: Your frontend URL (comma-separated).
+     - `DEBUG`: `false`
 
-You can also use `render.yaml` in this folder for Blueprint deploy.
+## 📊 API Overview
 
-## API overview
+- `POST /api/v1/auth/signup` - User registration
+- `POST /api/v1/auth/login` - User authentication
+- `GET /api/v1/stats/dashboard` - Productivity analytics
+- `GET/POST /api/v1/tasks` - Task management
+- `POST /api/v1/tasks/{id}/toggle` - Mark task as complete/incomplete
+- `GET/POST /api/v1/categories` - Category organization
 
-- `GET /health`
-- `GET/POST /api/v1/categories`
-- `PATCH/DELETE /api/v1/categories/{category_id}`
-- `GET/POST /api/v1/tasks`
-- `GET/PATCH/DELETE /api/v1/tasks/{task_id}`
-- `POST /api/v1/tasks/{task_id}/toggle`
-- `POST /api/v1/tasks/{task_id}/subtasks`
-- `PATCH /api/v1/tasks/{task_id}/subtasks/{subtask_id}`
-- `POST /api/v1/tasks/{task_id}/subtasks/{subtask_id}/toggle`
-- `GET /api/v1/stats/dashboard`
-- `POST /api/v1/auth/signup`
-- `POST /api/v1/auth/login`
-
-## Example request
-
-```bash
-curl -X POST http://localhost:8000/api/v1/categories \
-  -H "Content-Type: application/json" \
-  -d '{"name":"Work","color":"#22C55E"}'
-```
