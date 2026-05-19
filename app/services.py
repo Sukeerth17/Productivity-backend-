@@ -379,7 +379,7 @@ async def dashboard_stats(session: AsyncSession, user: User) -> dict[str, float 
         "completed_tasks": completed,
         "active_tasks": active,
         "categories": categories,
-        "completion_rate": round((completed / total * 100) if total else 0.0, 2),
+        "completion_rate": min(round((completed / total * 100) if total else 0.0, 2), 100.0),
     }
 
 
@@ -455,7 +455,7 @@ async def category_completion_stats(
     for row in rows:
         total_tasks = int(row["total_tasks"] or 0)
         completed_tasks = int(row["completed_tasks"] or 0)
-        completion_rate = round((completed_tasks / total_tasks * 100) if total_tasks else 0.0, 2)
+        completion_rate = min(round((completed_tasks / total_tasks * 100) if total_tasks else 0.0, 2), 100.0)
         stats.append(
             {
                 "category_id": str(row["category_id"]),
@@ -630,7 +630,7 @@ async def _get_category_breakdown(session: AsyncSession, user: User) -> list[Cat
         active = int(current_total_q.scalar_one() or 0)
         
         total = completed + active
-        rate = round((completed / total * 100) if total else 0.0, 2)
+        rate = min(round((completed / total * 100) if total else 0.0, 2), 100.0)
         
         breakdown.append(CategoryBreakdownItem(
             category_id=cat.id,
@@ -688,20 +688,20 @@ async def calculate_and_store_productivity_stats(
 
     # === DAY stats ===
     day_total, day_completed = await get_stats_for_period(today_start, today_end)
-    day_rate = round((day_completed / day_total * 100) if day_total else 0.0, 2)
+    day_rate = min(round((day_completed / day_total * 100) if day_total else 0.0, 2), 100.0)
     
 
     # === ALL-TIME stats ===
     alltime_total, alltime_completed = await get_stats_for_period(user_start, None)
-    alltime_rate = round((alltime_completed / alltime_total * 100) if alltime_total else 0.0, 2)
+    alltime_rate = min(round((alltime_completed / alltime_total * 100) if alltime_total else 0.0, 2), 100.0)
 
     # === WEEK stats ===
     week_total, week_completed = await get_stats_for_period(week_start, today_end)
-    week_rate = round((week_completed / week_total * 100) if week_total else 0.0, 2)
+    week_rate = min(round((week_completed / week_total * 100) if week_total else 0.0, 2), 100.0)
 
     # === MONTH stats ===
     month_total, month_completed = await get_stats_for_period(month_start, today_end)
-    month_rate = round((month_completed / month_total * 100) if month_total else 0.0, 2)
+    month_rate = min(round((month_completed / month_total * 100) if month_total else 0.0, 2), 100.0)
 
     # === TREND stats ===
     trend = []
@@ -718,7 +718,7 @@ async def calculate_and_store_productivity_stats(
         target_start = today_start - timedelta(days=i)
         target_end = target_start + timedelta(days=1)
         avail, comp = await get_stats_for_period(target_start, target_end)
-        rate = round((comp / avail * 100) if avail else 0.0, 2)
+        rate = min(round((comp / avail * 100) if avail else 0.0, 2), 100.0)
         trend.append(TrendPoint(date=target_start.date().strftime("%b %d"), rate=rate))
     
     trend.append(TrendPoint(date=now.strftime("%b %d"), rate=day_rate))
