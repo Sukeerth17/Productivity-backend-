@@ -22,3 +22,6 @@ refactor_stats.py
 reset_user.py
 test_list.py
 update_user_date.py
+check_trend.py
+recalculate_snapshots.py
+may16_tasks.txt

@@ -43,7 +43,11 @@ async def _write_daily_snapshots() -> None:
             habit_q = select(func.count(Task.id)).where(
                 Task.user_id == user.id, 
                 Task.is_habit.is_(True),
-                (Task.is_deleted.is_(False)) | (Task.deleted_at >= target_date),
+                Task.created_at < next_day_start,
+                or_(
+                    Task.is_deleted.is_(False),
+                    and_(Task.is_deleted.is_(True), Task.completed.is_(True), Task.completed_at >= target_date)
+                ),
                 or_(
                     Task.habit_days.is_(None),
                     Task.habit_days.contains(today_weekday)
@@ -57,7 +61,10 @@ async def _write_daily_snapshots() -> None:
                 Task.is_habit.is_(False),
                 Task.created_at < next_day_start,
                 or_(Task.completed.is_(False), Task.completed_at >= target_date),
-                or_(Task.is_deleted.is_(False), Task.deleted_at >= target_date),
+                or_(
+                    Task.is_deleted.is_(False),
+                    and_(Task.is_deleted.is_(True), Task.completed.is_(True), Task.completed_at >= target_date)
+                ),
                 or_(Task.start_date.is_(None), Task.start_date <= target_date.date())
             )
 
