@@ -202,12 +202,25 @@ async def list_tasks(
         filters.append(Task.priority == priority)
     if search:
         filters.append(Task.title.ilike(f"%{search.strip()}%"))
-    # Date filter: 'today' shows only tasks created today (UTC)
+    # Date filter: 'today' scopes tasks to today
+    # - Active tasks: only those created today OR habits (already scoped to today by habit_days filter)
+    # - Completed tasks: only those marked complete today (completed_at is today)
     if date_filter == "today":
         today_start = now_utc.replace(hour=0, minute=0, second=0, microsecond=0)
         today_end = today_start + timedelta(days=1)
-        filters.append(Task.created_at >= today_start)
-        filters.append(Task.created_at < today_end)
+        filters.append(or_(
+            # Active (pending) tasks: habits active today (already filtered above) OR one-offs created today
+            and_(
+                Task.completed.is_(False),
+                or_(Task.is_habit.is_(True), Task.created_at >= today_start)
+            ),
+            # Completed tasks: only those completed today, regardless of when they were created
+            and_(
+                Task.completed.is_(True),
+                Task.completed_at >= today_start,
+                Task.completed_at < today_end,
+            ),
+        ))
 
     base_query = select(Task).where(*filters)
     total_query = select(func.count(Task.id)).where(*filters)
