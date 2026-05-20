@@ -180,6 +180,7 @@ async def list_tasks(
     search: str | None,
     limit: int,
     offset: int,
+    date_filter: str | None = None,
 ) -> tuple[list[Task], int]:
     filters = [Task.user_id == user.id, Task.is_deleted.is_(False)]
     # Only show tasks whose start_date has arrived (or has no start_date)
@@ -201,6 +202,12 @@ async def list_tasks(
         filters.append(Task.priority == priority)
     if search:
         filters.append(Task.title.ilike(f"%{search.strip()}%"))
+    # Date filter: 'today' shows only tasks created today (UTC)
+    if date_filter == "today":
+        today_start = now_utc.replace(hour=0, minute=0, second=0, microsecond=0)
+        today_end = today_start + timedelta(days=1)
+        filters.append(Task.created_at >= today_start)
+        filters.append(Task.created_at < today_end)
 
     base_query = select(Task).where(*filters)
     total_query = select(func.count(Task.id)).where(*filters)
