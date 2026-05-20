@@ -84,6 +84,7 @@ class TaskUpdate(BaseModel):
     due_time: str | None = Field(default=None, max_length=12)
     start_date: date | None = None
     habit_days: list[int] | None = Field(default=None, description="Days habit is active: 0=Mon..6=Sun. null=daily.")
+    progress: int | None = Field(default=None, ge=0, le=100)
 
 
 class TaskOut(BaseModel):
@@ -99,6 +100,7 @@ class TaskOut(BaseModel):
     due_time: str | None
     start_date: date | None
     habit_days: list[int] | None
+    progress: int
     created_at: datetime
     completed_at: datetime | None
     updated_at: datetime

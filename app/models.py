@@ -116,6 +116,9 @@ class Task(Base):
     # Habit scheduling: comma-separated day numbers (0=Mon..6=Sun). NULL/empty = daily.
     habit_days: Mapped[str | None] = mapped_column(String(20), nullable=True)
 
+    # Task progress percentage (0-100)
+    progress: Mapped[int] = mapped_column(Integer, default=0)
+
     user: Mapped[User | None] = relationship(back_populates="tasks")
     category: Mapped[Category] = relationship(back_populates="tasks", lazy="joined")
     subtasks: Mapped[list[SubTask]] = relationship(

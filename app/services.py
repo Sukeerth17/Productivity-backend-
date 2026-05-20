@@ -147,6 +147,7 @@ async def create_task(session: AsyncSession, user: User, payload: TaskCreate) ->
         due_time=payload.due_time,
         start_date=payload.start_date,
         habit_days=_habit_days_to_str(payload.habit_days) if payload.is_habit else None,
+        progress=100 if payload.completed else 0,
     )
     for idx, sub in enumerate(payload.subtasks):
         task.subtasks.append(SubTask(title=sub.title.strip(), completed=sub.completed, position=idx))
@@ -246,16 +247,22 @@ async def update_task(session: AsyncSession, user: User, task: Task, payload: Ta
             raise ValueError("Invalid category_id")
     if "title" in data and data["title"] is not None:
         data["title"] = data["title"].strip()
+
+    # Keep progress and completion state consistent in both directions.
+    if "progress" in data and data["progress"] is not None and "completed" not in data:
+        data["completed"] = data["progress"] >= 100
+    elif "completed" in data and data["completed"] is not None and "progress" not in data:
+        data["progress"] = 100 if data["completed"] else 0
+
     if "completed" in data and data["completed"] is not None:
         old_completed = task.completed
         new_completed = data["completed"]
         if new_completed != old_completed:
             completed_delta = 1 if new_completed else -1
             await adjust_stats(session, user.id, category_id=task.category_id, completed_delta=completed_delta)
-        
+
         if new_completed and not old_completed:
             task.completed_at = datetime.now(timezone.utc)
-            # Log to completion ledger for accurate historical stats
             session.add(TaskCompletion(
                 user_id=user.id,
                 task_id=task.id,
@@ -264,9 +271,8 @@ async def update_task(session: AsyncSession, user: User, task: Task, payload: Ta
                 is_habit=task.is_habit,
                 completed_at=task.completed_at,
             ))
-        elif not new_completed:
+        elif not new_completed and old_completed:
             task.completed_at = None
-            # If uncompleted today, delete today's completion records to undo
             today_start = datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0)
             await session.execute(
                 delete(TaskCompletion).where(
@@ -327,6 +333,7 @@ async def update_subtask(session: AsyncSession, subtask: SubTask, payload: SubTa
 async def toggle_task_completion(session: AsyncSession, user: User, task: Task) -> Task:
     task.completed = not task.completed
     task.completed_at = datetime.now(timezone.utc) if task.completed else None
+    task.progress = 100 if task.completed else 0
     
     # Log to completion ledger for accurate historical stats
     if task.completed:
