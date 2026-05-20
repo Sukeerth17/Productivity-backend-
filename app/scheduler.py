@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import datetime, timedelta, timezone
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
-from sqlalchemy import and_, delete, func, select, or_
+from sqlalchemy import and_, delete, func, select, or_, not_
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import sessionmaker, selectinload
 
@@ -12,85 +12,104 @@ from .models import DailySnapshot, Task, TaskCompletion, User
 
 
 async def _write_daily_snapshots() -> None:
-    """Write a DailySnapshot for each user capturing today's available and completed counts."""
+    """Write DailySnapshots for all users for any missing past days (up to 30 days back)."""
     async_session = sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
     async with async_session() as session:
-        # Snapshots are written at 00:00 UTC for the day that just ended.
-        # So we look at (now - 1 day).
+        # Snapshots are written at 00:00 UTC for the day that just ended (yesterday).
         now = datetime.now(timezone.utc)
         yesterday = now - timedelta(days=1)
-        target_date = yesterday.replace(hour=0, minute=0, second=0, microsecond=0)
+        yesterday_midnight = yesterday.replace(hour=0, minute=0, second=0, microsecond=0)
         
         users_result = await session.execute(select(User))
         users = users_result.scalars().all()
 
         for user in users:
-            # Check if snapshot already exists for this target date
-            existing = await session.execute(
-                select(DailySnapshot).where(
-                    DailySnapshot.user_id == user.id,
-                    func.date(DailySnapshot.snapshot_date) == target_date.date(),
+            # Backfill from user's registration date up to yesterday, capping at 30 days to avoid performance issues
+            user_start = user.created_at.replace(hour=0, minute=0, second=0, microsecond=0)
+            max_backfill = yesterday_midnight - timedelta(days=30)
+            start_date = max(user_start, max_backfill)
+
+            cursor = start_date
+            while cursor <= yesterday_midnight:
+                # Check if snapshot already exists for this cursor date
+                existing = await session.execute(
+                    select(DailySnapshot).where(
+                        DailySnapshot.user_id == user.id,
+                        func.date(DailySnapshot.snapshot_date) == cursor.date(),
+                    )
                 )
-            )
-            if existing.scalar_one_or_none():
-                continue
+                if existing.scalar_one_or_none():
+                    cursor += timedelta(days=1)
+                    continue
 
-            # Count available tasks for the target date
-            today_weekday = str(target_date.date().weekday())
-            next_day_start = target_date + timedelta(days=1)
-            
-            # Habits
-            habit_q = select(func.count(Task.id)).where(
-                Task.user_id == user.id, 
-                Task.is_habit.is_(True),
-                Task.created_at < next_day_start,
-                or_(
-                    Task.is_deleted.is_(False),
-                    and_(Task.is_deleted.is_(True), Task.completed.is_(True), Task.completed_at >= target_date)
-                ),
-                or_(
-                    Task.habit_days.is_(None),
-                    Task.habit_days.contains(today_weekday)
-                ),
-                or_(Task.start_date.is_(None), Task.start_date <= target_date.date())
-            )
-            
-            # One-offs
-            oneoff_q = select(func.count(Task.id)).where(
-                Task.user_id == user.id,
-                Task.is_habit.is_(False),
-                Task.created_at < next_day_start,
-                or_(Task.completed.is_(False), Task.completed_at >= target_date),
-                or_(
-                    Task.is_deleted.is_(False),
-                    and_(Task.is_deleted.is_(True), Task.completed.is_(True), Task.completed_at >= target_date)
-                ),
-                or_(Task.start_date.is_(None), Task.start_date <= target_date.date())
-            )
-
-            total_available_habits = int((await session.execute(habit_q)).scalar_one() or 0)
-            total_available_oneoffs = int((await session.execute(oneoff_q)).scalar_one() or 0)
-            total_available = total_available_habits + total_available_oneoffs
-
-            # Count completions from ledger
-            completed_count = await session.execute(
-                select(func.count(TaskCompletion.id)).where(
-                    TaskCompletion.user_id == user.id,
-                    TaskCompletion.completed_at >= target_date,
-                    TaskCompletion.completed_at < next_day_start,
+                today_weekday = str(cursor.date().weekday())
+                next_day_start = cursor + timedelta(days=1)
+                
+                # 1. Count completions from ledger
+                completed_count = await session.execute(
+                    select(func.count(TaskCompletion.id)).where(
+                        TaskCompletion.user_id == user.id,
+                        TaskCompletion.completed_at >= cursor,
+                        TaskCompletion.completed_at < next_day_start,
+                    )
                 )
-            )
-            total_completed = int(completed_count.scalar_one() or 0)
+                total_completed = int(completed_count.scalar_one() or 0)
 
-            session.add(DailySnapshot(
-                user_id=user.id,
-                snapshot_date=target_date,
-                total_available=total_available,
-                total_completed=total_completed,
-            ))
+                # 2. Count pending one-offs (active on cursor day but not completed today)
+                pending_oneoff_q = select(func.count(Task.id)).where(
+                    Task.user_id == user.id,
+                    Task.is_habit.is_(False),
+                    Task.created_at < next_day_start,
+                    or_(Task.completed.is_(False), Task.completed_at >= next_day_start),
+                    or_(
+                        Task.is_deleted.is_(False),
+                        and_(Task.is_deleted.is_(True), Task.deleted_at >= next_day_start)
+                    ),
+                    or_(Task.start_date.is_(None), Task.start_date <= cursor.date())
+                )
+                pending_oneoffs = int((await session.execute(pending_oneoff_q)).scalar_one() or 0)
+
+                # 3. Count pending habits (active today but not completed today)
+                # Fetch task ids of habits completed on this cursor day
+                habit_comp_subq = (
+                    select(TaskCompletion.task_id)
+                    .where(
+                        TaskCompletion.user_id == user.id,
+                        TaskCompletion.completed_at >= cursor,
+                        TaskCompletion.completed_at < next_day_start,
+                        TaskCompletion.task_id.is_not(None)
+                    )
+                ).subquery()
+
+                pending_habit_q = select(func.count(Task.id)).where(
+                    Task.user_id == user.id,
+                    Task.is_habit.is_(True),
+                    Task.created_at < next_day_start,
+                    or_(
+                        Task.is_deleted.is_(False),
+                        and_(Task.is_deleted.is_(True), Task.deleted_at >= next_day_start)
+                    ),
+                    or_(
+                        Task.habit_days.is_(None),
+                        Task.habit_days.contains(today_weekday)
+                    ),
+                    or_(Task.start_date.is_(None), Task.start_date <= cursor.date()),
+                    not_(Task.id.in_(select(habit_comp_subq.c.task_id)))
+                )
+                pending_habits = int((await session.execute(pending_habit_q)).scalar_one() or 0)
+
+                total_available = total_completed + pending_oneoffs + pending_habits
+
+                session.add(DailySnapshot(
+                    user_id=user.id,
+                    snapshot_date=cursor,
+                    total_available=total_available,
+                    total_completed=total_completed,
+                ))
+                cursor += timedelta(days=1)
 
         await session.commit()
-        print(f"[SCHEDULER] Wrote daily snapshots for {len(users)} users at {now}")
+        print(f"[SCHEDULER] Completed daily snapshots backfill and update for {len(users)} users at {now}")
 
 
 async def cleanup_old_oneoff_tasks() -> None:
