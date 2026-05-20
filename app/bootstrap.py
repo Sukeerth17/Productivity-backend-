@@ -117,9 +117,24 @@ async def _ensure_extra_columns(conn: AsyncConnection) -> None:
         try:
             async with conn.begin_nested():
                 await conn.execute(text("ALTER TABLE tasks ADD COLUMN progress INTEGER DEFAULT 0"))
-                await conn.execute(text("UPDATE tasks SET progress = CASE WHEN completed THEN 100 ELSE 0 END WHERE progress IS NULL"))
         except Exception:
             pass
+
+    try:
+        async with conn.begin_nested():
+            await conn.execute(text("""
+                UPDATE tasks
+                SET progress = CASE
+                    WHEN completed THEN 100
+                    WHEN progress = 100 THEN 0
+                    ELSE COALESCE(progress, 0)
+                END
+                WHERE progress IS NULL
+                   OR (completed = TRUE AND progress <> 100)
+                   OR (completed = FALSE AND progress = 100)
+            """))
+    except Exception:
+        pass
 
 
 async def prepare_database(engine: AsyncEngine) -> None:

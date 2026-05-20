@@ -45,6 +45,34 @@ def _is_habit_active_today(habit_days_str: str | None) -> bool:
     return today_weekday in active_days
 
 
+def _normalize_task_progress(task: Task) -> bool:
+    """Repair legacy mismatches between completion state and stored progress."""
+    expected_progress = 100 if task.completed else 0
+
+    if task.completed and task.progress != 100:
+        task.progress = 100
+        return True
+
+    if not task.completed and task.progress == 100:
+        task.progress = 0
+        return True
+
+    if task.progress is None:
+        task.progress = expected_progress
+        return True
+
+    return False
+
+
+async def _normalize_tasks_progress(session: AsyncSession, tasks: list[Task]) -> None:
+    changed = False
+    for task in tasks:
+        changed = _normalize_task_progress(task) or changed
+
+    if changed:
+        await session.commit()
+
+
 async def _claim_orphaned_data_for_single_user(session: AsyncSession, user: User) -> None:
     user_count = int((await session.execute(select(func.count(User.id)))).scalar_one())
     if user_count != 1:
@@ -169,7 +197,10 @@ async def get_task_or_none(
     if with_subtasks:
         stmt = stmt.options(selectinload(Task.subtasks))
     result = await session.execute(stmt)
-    return result.scalar_one_or_none()
+    task = result.scalar_one_or_none()
+    if task:
+        await _normalize_tasks_progress(session, [task])
+    return task
 
 
 async def list_tasks(
@@ -235,6 +266,7 @@ async def list_tasks(
 
     tasks_result, total_result = await session.execute(tasks_query), await session.execute(total_query)
     tasks = list(tasks_result.scalars().unique().all())
+    await _normalize_tasks_progress(session, tasks)
     total = int(total_result.scalar_one())
     return tasks, total
 
