@@ -1,8 +1,9 @@
 import os
-from dotenv import load_dotenv
-
-# Load environment variables from .env file
-load_dotenv()
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except ImportError:
+    pass
 
 
 class Settings:
@@ -17,6 +18,7 @@ class Settings:
     ]
     default_page_size: int = int(os.getenv("DEFAULT_PAGE_SIZE", "50"))
     max_page_size: int = int(os.getenv("MAX_PAGE_SIZE", "200"))
+    redis_url: str = os.getenv("REDIS_URL", "redis://localhost:6379")
 
 
 settings = Settings()

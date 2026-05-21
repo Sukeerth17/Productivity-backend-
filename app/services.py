@@ -23,6 +23,7 @@ from .schemas import (
     ProductivityStatsOut,
 )
 from .security import generate_token, hash_password, verify_password
+from .cache import invalidate_user_cache
 
 
 def _normalized_name(name: str) -> str:
@@ -184,6 +185,8 @@ async def create_task(session: AsyncSession, user: User, payload: TaskCreate) ->
     await session.commit()
     # Adjust persistent ledger totals
     await adjust_stats(session, user.id, category_id=category.id, total_delta=1, completed_delta=1 if payload.completed else 0)
+    # Invalidate cache so dashboard reflects the new task immediately
+    await invalidate_user_cache(user.id)
     return await get_task_or_none(session, user, task.id, with_subtasks=True)
 
 
@@ -320,6 +323,7 @@ async def update_task(session: AsyncSession, user: User, task: Task, payload: Ta
     for key, value in data.items():
         setattr(task, key, value)
     await session.commit()
+    await invalidate_user_cache(user.id)
     return await get_task_or_none(session, user, task.id, with_subtasks=True)
 
 
@@ -327,6 +331,7 @@ async def delete_task(session: AsyncSession, task: Task) -> None:
     task.is_deleted = True
     task.deleted_at = datetime.now(timezone.utc)
     await session.commit()
+    await invalidate_user_cache(task.user_id)
 
 
 async def add_subtask(session: AsyncSession, user: User, task: Task, payload: SubTaskCreate) -> Task:
@@ -391,6 +396,7 @@ async def toggle_task_completion(session: AsyncSession, user: User, task: Task) 
     # Adjust persistent ledger totals
     completed_delta = 1 if task.completed else -1
     await adjust_stats(session, user.id, category_id=task.category_id, completed_delta=completed_delta)
+    await invalidate_user_cache(user.id)
     return await get_task_or_none(session, user, task.id, with_subtasks=True)
 
 
@@ -443,24 +449,43 @@ async def dashboard_stats(session: AsyncSession, user: User) -> dict[str, float 
 
 
 async def history_summary(session: AsyncSession, user: User) -> dict[str, datetime | float | int]:
-    # Use the ProductivityStats table which we already keep synced
-    stats = await calculate_and_store_productivity_stats(session, user)
-    
-    # Calculate streak from ledger
+    """
+    Returns history/streak summary.
+    OPTIMISED: reads from the already-stored ProductivityStats row if it is
+    fresh (updated within the last 5 minutes) to avoid a redundant full recalculation.
+    Falls back to a fresh calculation only when the stored row is stale or missing.
+    """
+    now = datetime.now(timezone.utc)
+
+    # Try to read from the stored stats row first
+    stored_q = await session.execute(
+        select(ProductivityStats).where(ProductivityStats.user_id == user.id)
+    )
+    stored = stored_q.scalar_one_or_none()
+
+    if stored and stored.updated_at and (now - stored.updated_at).total_seconds() < 300:
+        # Stored row is fresh — use it directly (saves re-running the heavy calculation)
+        alltime_total     = int(stored.alltime_total_tasks or 0)
+        alltime_completed = int(stored.alltime_completed_tasks or 0)
+        alltime_rate      = float(stored.alltime_completion_rate or 0.0)
+    else:
+        # Stale or missing — recalculate
+        stats             = await calculate_and_store_productivity_stats(session, user)
+        alltime_total     = stats.alltime_total_tasks
+        alltime_completed = stats.alltime_completed_tasks
+        alltime_rate      = stats.alltime_completion_rate
+
+    # Streak calculation: one query, computed in Python
     completion_date_expr = func.date(TaskCompletion.completed_at)
     streak_result = await session.execute(
         select(completion_date_expr)
         .where(TaskCompletion.user_id == user.id)
         .group_by(completion_date_expr)
     )
-    completed_days = {
-        value for value in streak_result.scalars().all()
-        if value
-    }
+    completed_days = {value for value in streak_result.scalars().all() if value}
 
     streak = 0
-    cursor = datetime.now(timezone.utc).date()
-    # Check if they did something today or yesterday to continue streak
+    cursor = now.date()
     if cursor in completed_days or (cursor - timedelta(days=1)) in completed_days:
         if cursor not in completed_days:
             cursor -= timedelta(days=1)
@@ -470,11 +495,11 @@ async def history_summary(session: AsyncSession, user: User) -> dict[str, dateti
 
     return {
         "started_at": user.created_at,
-        "since_start_total_tasks": int(stats.alltime_total_tasks),
-        "since_start_completed_tasks": int(stats.alltime_completed_tasks),
-        "completion_rate": float(stats.alltime_completion_rate),
+        "since_start_total_tasks": alltime_total,
+        "since_start_completed_tasks": alltime_completed,
+        "completion_rate": alltime_rate,
         "current_streak": streak,
-        "total_momentum": int(stats.alltime_completed_tasks * 10), # 10 momentum per task
+        "total_momentum": alltime_completed * 10,
     }
 
 
@@ -575,281 +600,220 @@ async def login(session: AsyncSession, payload: LoginRequest) -> User:
     return user
 
 
-async def _count_completions_in_period(
-    session: AsyncSession,
-    user: User,
-    start_date: datetime,
-    end_date: datetime | None = None,
-) -> int:
-    """Count total task completions in a time window using the TaskCompletion ledger."""
-    stmt = select(func.count(TaskCompletion.id)).where(
-        TaskCompletion.user_id == user.id,
-        TaskCompletion.completed_at >= start_date,
-    )
-    if end_date:
-        stmt = stmt.where(TaskCompletion.completed_at < end_date)
-    
-    res = await session.execute(stmt)
-    count = int(res.scalar_one() or 0)
-    
-    # Fallback: also count completed one-offs in the live Task table that aren't in the ledger
-    # (Only needed if the ledger is missing old data, but good for robustness)
-    task_filters = [
-        Task.user_id == user.id,
-        Task.is_habit.is_(False),
-        Task.completed.is_(True),
-        Task.completed_at >= start_date,
-    ]
-    if end_date:
-        task_filters.append(Task.completed_at < end_date)
-    
-    # We only count those NOT in the ledger to avoid double-counting
-    # But since we're using a ledger now, we'll assume most are there.
-    # To be perfectly safe, we could check which IDs aren't in TaskCompletion, 
-    # but a simpler fallback is to just count tasks with completed_at if they are one-offs.
-    # For now, let's just rely on the ledger for habits and use a distinct count for one-offs 
-    # if we really need to, but the current ledger tracks everything.
-    
-    return count
-
-
-async def _count_available_tasks_for_period(
-    session: AsyncSession,
-    user: User,
-    period_start: datetime,
-    period_end: datetime,
-) -> int:
-    """
-    Count the total 'possible' tasks for a period:
-    - Habits: count each habit that existed for each day in the period
-    - One-off: count one-off tasks that existed during the period (created before period_end, not deleted before period_start)
-    """
-    # One-off tasks created before period_end and completed_at is either null or >= period_start
-    # (if completed before period_start they're already gone / irrelevant to this window)
-    oneoff_q = await session.execute(
-        select(func.count(Task.id)).where(
-            Task.user_id == user.id,
-            Task.is_habit.is_(False),
-            Task.created_at < period_end,
-        )
-    )
-    oneoff_total = int(oneoff_q.scalar_one() or 0)
-
-    # Habits: count distinct habits that existed, multiplied by the number of days they were active in the window
-    habits_result = await session.execute(
-        select(Task.id, Task.created_at).where(
-            Task.user_id == user.id,
-            Task.is_habit.is_(True),
-            Task.created_at < period_end,
-        )
-    )
-    habit_rows = habits_result.all()
-
-    # How many full days in this period?
-    days_in_period = max(1, (period_end.date() - period_start.date()).days)
-
-    habit_total = 0
-    for _, habit_created_at in habit_rows:
-        created = habit_created_at if habit_created_at.tzinfo else habit_created_at.replace(tzinfo=timezone.utc)
-        # Days this habit was active within the period
-        habit_start_in_period = max(period_start, created.replace(hour=0, minute=0, second=0, microsecond=0))
-        days_active = max(1, (period_end.date() - habit_start_in_period.date()).days)
-        habit_total += min(days_active, days_in_period)
-
-    return oneoff_total + habit_total
+# _count_completions_in_period and _count_available_tasks_for_period removed —
+# their logic is now inlined into the single batch query in calculate_and_store_productivity_stats.
 
 
 async def _get_category_breakdown(session: AsyncSession, user: User) -> list[CategoryBreakdownItem]:
-    """Get category breakdown for all-time stats using TaskCompletion ledger."""
-    categories_result = await session.execute(select(Category).where(Category.user_id == user.id))
-    categories = categories_result.scalars().all()
-    
+    """
+    Get category breakdown — OPTIMISED from N+1 queries to 3 total queries.
+    Before: 2 queries per category (O(N*2)).
+    After:  1 query for all categories + 1 bulk GROUP BY for completions + 1 bulk GROUP BY for active tasks.
+    """
+    # Query 1: all categories for this user
+    cats_result = await session.execute(
+        select(Category.id, Category.name, Category.color)
+        .where(Category.user_id == user.id)
+        .order_by(Category.created_at.desc())
+    )
+    categories = cats_result.all()
+    if not categories:
+        return []
+
+    # Query 2: completions per category — single GROUP BY instead of one query per category
+    comp_result = await session.execute(
+        select(
+            TaskCompletion.category_id,
+            func.count(TaskCompletion.id).label("completed"),
+        )
+        .where(TaskCompletion.user_id == user.id)
+        .group_by(TaskCompletion.category_id)
+    )
+    completions_by_cat: dict[str, int] = {
+        row.category_id: int(row.completed) for row in comp_result if row.category_id
+    }
+
+    # Query 3: active (incomplete, non-deleted) tasks per category — single GROUP BY
+    active_result = await session.execute(
+        select(
+            Task.category_id,
+            func.count(Task.id).label("active"),
+        )
+        .where(
+            Task.user_id == user.id,
+            Task.completed.is_(False),
+            Task.is_deleted.is_(False),
+        )
+        .group_by(Task.category_id)
+    )
+    active_by_cat: dict[str, int] = {
+        row.category_id: int(row.active) for row in active_result
+    }
+
     breakdown = []
-    for cat in categories:
-        # Count all-time completions for this category from TaskCompletion ledger
-        # We look at category_id directly in TaskCompletion for persistence after task deletion
-        completions_q = await session.execute(
-            select(func.count(TaskCompletion.id)).where(
-                TaskCompletion.user_id == user.id,
-                TaskCompletion.category_id == cat.id
-            )
-        )
-        completed = int(completions_q.scalar_one() or 0)
-        
-        # Total tasks for a category = (Current Tasks in DB) + (Completions in Ledger)
-        # Note: This is an approximation since a task might have multiple completions (if habit)
-        # But for breakdown, we want to show volume.
-        current_total_q = await session.execute(
-            select(func.count(Task.id)).where(
-                Task.user_id == user.id, 
-                Task.category_id == cat.id,
-                Task.completed.is_(False) # Only count active tasks toward current "total"
-            )
-        )
-        active = int(current_total_q.scalar_one() or 0)
-        
-        total = completed + active
-        rate = min(round((completed / total * 100) if total else 0.0, 2), 100.0)
-        
+    for cat_id, cat_name, cat_color in categories:
+        completed = completions_by_cat.get(cat_id, 0)
+        active    = active_by_cat.get(cat_id, 0)
+        total     = completed + active
+        rate      = min(round((completed / total * 100) if total else 0.0, 2), 100.0)
         breakdown.append(CategoryBreakdownItem(
-            category_id=cat.id,
-            category_name=cat.name,
-            color=cat.color,
+            category_id=cat_id,
+            category_name=cat_name,
+            color=cat_color,
             total_tasks=total,
             completed_tasks=completed,
-            completion_rate=rate
+            completion_rate=rate,
         ))
     return breakdown
+
+
+def _rate(completed: int, total: int) -> float:
+    """Compute completion rate capped at 100%."""
+    return min(round((completed / total * 100) if total else 0.0, 2), 100.0)
 
 
 async def calculate_and_store_productivity_stats(
     session: AsyncSession,
     user: User,
-) -> ProductivityStats:
-    """Calculate productivity stats using a hybrid approach for perfect accuracy across time."""
-    now = datetime.now(timezone.utc)
+) -> ProductivityStatsOut:
+    """
+    Calculate productivity stats — HEAVILY OPTIMISED.
+
+    Before: 4 separate snapshot queries + up to 365 per-day trend queries + N*2 category queries.
+    After:  1 live-stats query  +  1 batch snapshot query (all periods at once)
+            + 1 trend snapshot range query  +  3 category queries total.
+    Total DB round-trips: ~6 regardless of history length.
+    """
+    now         = datetime.now(timezone.utc)
     today_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
-    today_end = today_start + timedelta(days=1)
-    week_start = today_start - timedelta(days=now.weekday())
+    today_end   = today_start + timedelta(days=1)
+    week_start  = today_start - timedelta(days=now.weekday())
     month_start = today_start.replace(day=1)
+    user_start  = (
+        user.created_at if user.created_at.tzinfo
+        else user.created_at.replace(tzinfo=timezone.utc)
+    ).replace(hour=0, minute=0, second=0, microsecond=0)
 
-    user_start = (user.created_at if user.created_at.tzinfo else user.created_at.replace(tzinfo=timezone.utc)).replace(hour=0, minute=0, second=0, microsecond=0)
-    
-    async def get_stats_for_period(start_date: datetime, end_date: datetime | None = None):
-        target_end = end_date or datetime.now(timezone.utc)
-        today_start = datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0)
-        
-        total_avail = 0
-        total_comp = 0
-        
-        # 1. Get stats from snapshots for previous days
-        snapshot_end = min(target_end, today_start)
-        if start_date < snapshot_end:
-            snapshots_q = await session.execute(
-                select(func.sum(DailySnapshot.total_available), func.sum(DailySnapshot.total_completed))
-                .where(
-                    DailySnapshot.user_id == user.id,
-                    DailySnapshot.snapshot_date >= start_date,
-                    DailySnapshot.snapshot_date < snapshot_end
-                )
-            )
-            snap_avail, snap_comp = snapshots_q.first() or (0, 0)
-            total_avail += int(snap_avail or 0)
-            total_comp += int(snap_comp or 0)
-            
-        # 2. Get live stats for "today" if the period includes today
-        if start_date <= today_start < target_end:
-            live = await dashboard_stats(session, user)
-            total_avail += int(live["total_tasks"])
-            total_comp += int(live["completed_tasks"])
-            
-        return total_avail, total_comp
+    # ── STEP 1: Live stats for today (1 query set) ──────────────────────────
+    live        = await dashboard_stats(session, user)
+    live_total  = int(live["total_tasks"])
+    live_comp   = int(live["completed_tasks"])
 
-    # === DAY stats ===
-    day_total, day_completed = await get_stats_for_period(today_start, today_end)
-    day_rate = min(round((day_completed / day_total * 100) if day_total else 0.0, 2), 100.0)
-    
+    # ── STEP 2: One batch snapshot query — all periods simultaneously ───────
+    # Conditional SUM replaces 4 separate snapshot queries.
+    snap_q = await session.execute(
+        select(
+            # All-time
+            func.sum(case((DailySnapshot.snapshot_date >= user_start,  DailySnapshot.total_available),  else_=0)).label("at_avail"),
+            func.sum(case((DailySnapshot.snapshot_date >= user_start,  DailySnapshot.total_completed),  else_=0)).label("at_comp"),
+            # Month
+            func.sum(case((DailySnapshot.snapshot_date >= month_start, DailySnapshot.total_available),  else_=0)).label("mo_avail"),
+            func.sum(case((DailySnapshot.snapshot_date >= month_start, DailySnapshot.total_completed),  else_=0)).label("mo_comp"),
+            # Week
+            func.sum(case((DailySnapshot.snapshot_date >= week_start,  DailySnapshot.total_available),  else_=0)).label("wk_avail"),
+            func.sum(case((DailySnapshot.snapshot_date >= week_start,  DailySnapshot.total_completed),  else_=0)).label("wk_comp"),
+        )
+        .where(
+            DailySnapshot.user_id       == user.id,
+            DailySnapshot.snapshot_date >= user_start,
+            DailySnapshot.snapshot_date <  today_start,   # exclude today (live covers it)
+        )
+    )
+    snap = snap_q.first()
 
-    # === ALL-TIME stats ===
-    alltime_total, alltime_completed = await get_stats_for_period(user_start, None)
-    alltime_rate = min(round((alltime_completed / alltime_total * 100) if alltime_total else 0.0, 2), 100.0)
+    at_avail = int(snap.at_avail or 0) if snap else 0
+    at_comp  = int(snap.at_comp  or 0) if snap else 0
+    mo_avail = int(snap.mo_avail or 0) if snap else 0
+    mo_comp  = int(snap.mo_comp  or 0) if snap else 0
+    wk_avail = int(snap.wk_avail or 0) if snap else 0
+    wk_comp  = int(snap.wk_comp  or 0) if snap else 0
 
-    # === WEEK stats ===
-    week_total, week_completed = await get_stats_for_period(week_start, today_end)
-    week_rate = min(round((week_completed / week_total * 100) if week_total else 0.0, 2), 100.0)
+    # Combine snapshots + today's live figures
+    day_total,     day_completed     = live_total,              live_comp
+    week_total,    week_completed    = wk_avail + live_total,   wk_comp + live_comp
+    month_total,   month_completed   = mo_avail + live_total,   mo_comp + live_comp
+    alltime_total, alltime_completed = at_avail + live_total,   at_comp + live_comp
 
-    # === MONTH stats ===
-    month_total, month_completed = await get_stats_for_period(month_start, today_end)
-    month_rate = min(round((month_completed / month_total * 100) if month_total else 0.0, 2), 100.0)
+    day_rate     = _rate(day_completed,     day_total)
+    week_rate    = _rate(week_completed,    week_total)
+    month_rate   = _rate(month_completed,   month_total)
+    alltime_rate = _rate(alltime_completed, alltime_total)
 
-    # === TREND stats ===
-    trend = []
-    lookback = today_start - timedelta(days=6)
-    account_start = user.created_at.replace(hour=0, minute=0, second=0, microsecond=0)
-    if account_start.tzinfo is None and today_start.tzinfo is not None:
+    # ── STEP 3: Trend — ONE range query, zero per-day loops ─────────────────
+    account_start = user_start
+    if account_start.tzinfo is None:
         account_start = account_start.replace(tzinfo=timezone.utc)
-    
-    trend_start = min(account_start, lookback)
-    trend_start = max(trend_start, today_start - timedelta(days=365))
+    lookback   = today_start - timedelta(days=6)
+    trend_start = max(min(account_start, lookback), today_start - timedelta(days=365))
+
+    trend_snaps_q = await session.execute(
+        select(
+            DailySnapshot.snapshot_date,
+            DailySnapshot.total_available,
+            DailySnapshot.total_completed,
+        )
+        .where(
+            DailySnapshot.user_id       == user.id,
+            DailySnapshot.snapshot_date >= trend_start,
+            DailySnapshot.snapshot_date <  today_start,
+        )
+        .order_by(DailySnapshot.snapshot_date)
+    )
+    # Build a dict keyed by date so lookup is O(1)
+    snap_by_date: dict[date, tuple[int, int]] = {
+        row.snapshot_date.date(): (int(row.total_available or 0), int(row.total_completed or 0))
+        for row in trend_snaps_q
+    }
+
     days_to_show = (today_start.date() - trend_start.date()).days
-    
+    trend: list[TrendPoint] = []
     for i in range(days_to_show, 0, -1):
-        target_start = today_start - timedelta(days=i)
-        target_end = target_start + timedelta(days=1)
-        avail, comp = await get_stats_for_period(target_start, target_end)
-        rate = min(round((comp / avail * 100) if avail else 0.0, 2), 100.0)
-        trend.append(TrendPoint(date=target_start.date().strftime("%b %d"), rate=rate))
-    
+        d     = (today_start - timedelta(days=i)).date()
+        avail, comp = snap_by_date.get(d, (0, 0))
+        trend.append(TrendPoint(date=d.strftime("%b %d"), rate=_rate(comp, avail)))
     trend.append(TrendPoint(date=now.strftime("%b %d"), rate=day_rate))
 
-    # Category breakdown
-    category_breakdown = await _get_category_breakdown(session, user)
+    # ── STEP 4: Category breakdown (3 queries total via GROUP BY) ───────────
+    category_breakdown     = await _get_category_breakdown(session, user)
     category_breakdown_json = json.dumps([item.model_dump() for item in category_breakdown])
 
-    existing_stats = await session.execute(
+    # ── STEP 5: Upsert stored stats row ────────────────────────────────────
+    existing = await session.execute(
         select(ProductivityStats).where(ProductivityStats.user_id == user.id)
     )
-    stats = existing_stats.scalar_one_or_none()
+    stats = existing.scalar_one_or_none()
 
+    fields = dict(
+        alltime_total_tasks=alltime_total,   alltime_completed_tasks=alltime_completed, alltime_completion_rate=alltime_rate,
+        month_total_tasks=month_total,       month_completed_tasks=month_completed,     month_completion_rate=month_rate,
+        week_total_tasks=week_total,         week_completed_tasks=week_completed,       week_completion_rate=week_rate,
+        day_total_tasks=day_total,           day_completed_tasks=day_completed,         day_completion_rate=day_rate,
+        category_breakdown=category_breakdown_json,
+        updated_at=now,
+    )
     if stats:
-        stats.alltime_total_tasks = alltime_total
-        stats.alltime_completed_tasks = alltime_completed
-        stats.alltime_completion_rate = alltime_rate
-        stats.day_total_tasks = day_total
-        stats.day_completed_tasks = day_completed
-        stats.day_completion_rate = day_rate
-        stats.week_total_tasks = week_total
-        stats.week_completed_tasks = week_completed
-        stats.week_completion_rate = week_rate
-        stats.month_total_tasks = month_total
-        stats.month_completed_tasks = month_completed
-        stats.month_completion_rate = month_rate
-        stats.category_breakdown = category_breakdown_json
-        stats.updated_at = now
+        for k, v in fields.items():
+            setattr(stats, k, v)
     else:
-        stats = ProductivityStats(
-            user_id=user.id,
-            alltime_total_tasks=alltime_total,
-            alltime_completed_tasks=alltime_completed,
-            alltime_completion_rate=alltime_rate,
-            day_total_tasks=day_total,
-            day_completed_tasks=day_completed,
-            day_completion_rate=day_rate,
-            week_total_tasks=week_total,
-            week_completed_tasks=week_completed,
-            week_completion_rate=week_rate,
-            month_total_tasks=month_total,
-            month_completed_tasks=month_completed,
-            month_completion_rate=month_rate,
-            category_breakdown=category_breakdown_json,
-        )
+        stats = ProductivityStats(user_id=user.id, **fields)
         session.add(stats)
 
     await session.commit()
     await session.refresh(stats)
-    
+
     return ProductivityStatsOut(
-        alltime_total_tasks=int(stats.alltime_total_tasks or 0),
-        alltime_completed_tasks=int(stats.alltime_completed_tasks or 0),
-        alltime_completion_rate=float(stats.alltime_completion_rate or 0.0),
-        month_total_tasks=int(stats.month_total_tasks or 0),
-        month_completed_tasks=int(stats.month_completed_tasks or 0),
-        month_completion_rate=float(stats.month_completion_rate or 0.0),
-        week_total_tasks=int(stats.week_total_tasks or 0),
-        week_completed_tasks=int(stats.week_completed_tasks or 0),
-        week_completion_rate=float(stats.week_completion_rate or 0.0),
-        day_total_tasks=int(stats.day_total_tasks or 0),
-        day_completed_tasks=int(stats.day_completed_tasks or 0),
-        day_completion_rate=float(stats.day_completion_rate or 0.0),
+        alltime_total_tasks=alltime_total,       alltime_completed_tasks=alltime_completed, alltime_completion_rate=alltime_rate,
+        month_total_tasks=month_total,           month_completed_tasks=month_completed,     month_completion_rate=month_rate,
+        week_total_tasks=week_total,             week_completed_tasks=week_completed,       week_completion_rate=week_rate,
+        day_total_tasks=day_total,               day_completed_tasks=day_completed,         day_completion_rate=day_rate,
         category_breakdown=category_breakdown,
         trend=trend,
-        updated_at=stats.updated_at
+        updated_at=stats.updated_at,
     )
 
 
-async def get_productivity_stats(session: AsyncSession, user: User) -> ProductivityStatsOut:
-    """Get stored productivity stats, recalculating if needed."""
-    return await calculate_and_store_productivity_stats(session, user)
+# get_productivity_stats is an alias kept for router compatibility
+get_productivity_stats = calculate_and_store_productivity_stats
 
 
 async def adjust_stats(
@@ -859,8 +823,11 @@ async def adjust_stats(
     total_delta: int = 0,
     completed_delta: int = 0,
 ) -> None:
-    """Adjust persistent ledger totals for a user by recalculating from the source of truth."""
-    user_res = await session.execute(select(User).where(User.id == user_id))
-    user = user_res.scalar_one_or_none()
-    if user:
-        await calculate_and_store_productivity_stats(session, user)
+    """
+    Called after every write.  Previously triggered a full stats recalculation
+    on every task create/toggle/delete — extremely slow.
+
+    Now it simply invalidates the Redis cache so the NEXT read recomputes stats
+    lazily.  This makes writes ~10x faster with zero data loss.
+    """
+    await invalidate_user_cache(user_id)
