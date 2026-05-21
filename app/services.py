@@ -216,19 +216,25 @@ async def list_tasks(
     limit: int,
     offset: int,
     date_filter: str | None = None,
+    include_future: bool = False,
 ) -> tuple[list[Task], int]:
     filters = [Task.user_id == user.id, Task.is_deleted.is_(False)]
-    # Only show tasks whose start_date has arrived (or has no start_date)
     now_utc = datetime.now(timezone.utc)
     today = now_utc.date()
     today_weekday = str(today.weekday())  # 0=Mon..6=Sun
-    filters.append(or_(Task.start_date.is_(None), Task.start_date <= today))
-    # Only show habits that are active today (habit_days is null=daily, or contains today's weekday)
-    filters.append(or_(
-        Task.is_habit.is_(False),  # non-habits always show
-        Task.habit_days.is_(None),  # daily habits always show
-        Task.habit_days.contains(today_weekday),  # specific-day habits show if today matches
-    ))
+
+    if include_future:
+        # Show ONLY tasks whose start_date is strictly in the future
+        filters.append(Task.start_date > today)
+    else:
+        # Default: hide tasks that haven't started yet
+        filters.append(or_(Task.start_date.is_(None), Task.start_date <= today))
+        # Only show habits that are active today
+        filters.append(or_(
+            Task.is_habit.is_(False),
+            Task.habit_days.is_(None),
+            Task.habit_days.contains(today_weekday),
+        ))
     if category_id:
         filters.append(Task.category_id == category_id)
     if completed is not None:
@@ -257,12 +263,15 @@ async def list_tasks(
             ),
         ))
 
-    base_query = select(Task).where(*filters)
+    base_query  = select(Task).where(*filters)
     total_query = select(func.count(Task.id)).where(*filters)
+
+    # Future tasks ordered by start_date asc so soonest appears first
+    order_col = Task.start_date.asc() if include_future else Task.created_at.desc()
 
     tasks_query = (
         base_query.options(selectinload(Task.subtasks))
-        .order_by(Task.created_at.desc())
+        .order_by(order_col)
         .limit(limit)
         .offset(offset)
     )

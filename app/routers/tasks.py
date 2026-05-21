@@ -39,6 +39,7 @@ async def get_tasks(
     priority: str | None = Query(default=None, pattern="^(low|medium|high)$"),
     search: str | None = Query(default=None),
     date_filter: str | None = Query(default=None, pattern="^(today|all)$"),
+    include_future: bool = Query(default=False),
     limit: int = Query(default=settings.default_page_size, ge=1, le=settings.max_page_size),
     offset: int = Query(default=0, ge=0),
     session: AsyncSession = Depends(get_session),
@@ -47,6 +48,7 @@ async def get_tasks(
     tasks, total = await list_tasks(
         session, current_user, category_id, completed, priority, search, limit, offset,
         date_filter=date_filter,
+        include_future=include_future,
     )
     return {"items": tasks, "total": total, "limit": limit, "offset": offset}
 
