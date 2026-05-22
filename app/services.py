@@ -432,7 +432,7 @@ async def dashboard_stats(session: AsyncSession, user: User) -> dict[str, float 
         or_(Task.is_habit.is_(False), Task.habit_days.is_(None), Task.habit_days.contains(today_weekday)),
     ]
     
-    # Active tasks = Pending tasks (whose start_date has arrived)
+    # Active tasks = Pending (incomplete) tasks that are available for today
     active_q = await session.execute(select(func.count(Task.id)).where(*filters, Task.completed.is_(False)))
     active = int(active_q.scalar_one())
     
