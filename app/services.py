@@ -250,11 +250,8 @@ async def list_tasks(
         today_start = now_utc.replace(hour=0, minute=0, second=0, microsecond=0)
         today_end = today_start + timedelta(days=1)
         filters.append(or_(
-            # Active (pending) tasks: habits active today (already filtered above) OR one-offs created today
-            and_(
-                Task.completed.is_(False),
-                or_(Task.is_habit.is_(True), Task.created_at >= today_start)
-            ),
+            # Active (pending) tasks: any pending task that is available today (already filtered above)
+            Task.completed.is_(False),
             # Completed tasks: only those completed today, regardless of when they were created
             and_(
                 Task.completed.is_(True),
