@@ -216,6 +216,8 @@ class ProductivityStatsOut(BaseModel):
     day_completed_tasks: int
     day_completion_rate: float
     
+    current_streak: int
+    
     # Trend for last 7 days
     trend: list[TrendPoint] = Field(default_factory=list)
     

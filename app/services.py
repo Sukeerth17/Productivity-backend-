@@ -474,30 +474,14 @@ async def history_summary(session: AsyncSession, user: User) -> dict[str, dateti
         alltime_total     = int(stored.alltime_total_tasks or 0)
         alltime_completed = int(stored.alltime_completed_tasks or 0)
         alltime_rate      = float(stored.alltime_completion_rate or 0.0)
+        streak            = int(stored.current_streak or 0)
     else:
         # Stale or missing — recalculate
         stats             = await calculate_and_store_productivity_stats(session, user)
         alltime_total     = stats.alltime_total_tasks
         alltime_completed = stats.alltime_completed_tasks
         alltime_rate      = stats.alltime_completion_rate
-
-    # Streak calculation: one query, computed in Python
-    completion_date_expr = func.date(TaskCompletion.completed_at)
-    streak_result = await session.execute(
-        select(completion_date_expr)
-        .where(TaskCompletion.user_id == user.id)
-        .group_by(completion_date_expr)
-    )
-    completed_days = {value for value in streak_result.scalars().all() if value}
-
-    streak = 0
-    cursor = now.date()
-    if cursor in completed_days or (cursor - timedelta(days=1)) in completed_days:
-        if cursor not in completed_days:
-            cursor -= timedelta(days=1)
-        while cursor in completed_days:
-            streak += 1
-            cursor -= timedelta(days=1)
+        streak            = stats.current_streak
 
     return {
         "started_at": user.created_at,
@@ -783,6 +767,24 @@ async def calculate_and_store_productivity_stats(
     category_breakdown     = await _get_category_breakdown(session, user)
     category_breakdown_json = json.dumps([item.model_dump() for item in category_breakdown])
 
+    # ── STEP 4.5: Calculate Streak ──────────────────────────────────────────
+    completion_date_expr = func.date(TaskCompletion.completed_at)
+    streak_result = await session.execute(
+        select(completion_date_expr)
+        .where(TaskCompletion.user_id == user.id)
+        .group_by(completion_date_expr)
+    )
+    completed_days = {value for value in streak_result.scalars().all() if value}
+
+    streak = 0
+    cursor = now.date()
+    if cursor in completed_days or (cursor - timedelta(days=1)) in completed_days:
+        if cursor not in completed_days:
+            cursor -= timedelta(days=1)
+        while cursor in completed_days:
+            streak += 1
+            cursor -= timedelta(days=1)
+
     # ── STEP 5: Upsert stored stats row ────────────────────────────────────
     existing = await session.execute(
         select(ProductivityStats).where(ProductivityStats.user_id == user.id)
@@ -794,6 +796,7 @@ async def calculate_and_store_productivity_stats(
         month_total_tasks=month_total,       month_completed_tasks=month_completed,     month_completion_rate=month_rate,
         week_total_tasks=week_total,         week_completed_tasks=week_completed,       week_completion_rate=week_rate,
         day_total_tasks=day_total,           day_completed_tasks=day_completed,         day_completion_rate=day_rate,
+        current_streak=streak,
         category_breakdown=category_breakdown_json,
         updated_at=now,
     )
@@ -804,6 +807,7 @@ async def calculate_and_store_productivity_stats(
         stats = ProductivityStats(user_id=user.id, **fields)
         session.add(stats)
 
+
     await session.commit()
     await session.refresh(stats)
 
@@ -812,6 +816,7 @@ async def calculate_and_store_productivity_stats(
         month_total_tasks=month_total,           month_completed_tasks=month_completed,     month_completion_rate=month_rate,
         week_total_tasks=week_total,             week_completed_tasks=week_completed,       week_completion_rate=week_rate,
         day_total_tasks=day_total,               day_completed_tasks=day_completed,         day_completion_rate=day_rate,
+        current_streak=streak,
         category_breakdown=category_breakdown,
         trend=trend,
         updated_at=stats.updated_at,

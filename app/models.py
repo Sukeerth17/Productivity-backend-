@@ -184,6 +184,9 @@ class ProductivityStats(Base):
     day_completed_tasks: Mapped[int] = mapped_column(Integer, default=0)
     day_completion_rate: Mapped[float] = mapped_column(default=0.0)
     
+    # Streak
+    current_streak: Mapped[int] = mapped_column(Integer, default=0)
+    
     # Category breakdown for all-time
     category_breakdown: Mapped[str | None] = mapped_column(Text, nullable=True)  # JSON string
     
