@@ -444,12 +444,14 @@ async def dashboard_stats(session: AsyncSession, user: User) -> dict[str, float 
     
     categories_q = await session.execute(select(func.count(Category.id)).where(Category.user_id == user.id))
     categories = int(categories_q.scalar_one())
+    streak = await _calculate_current_streak(session, user.id, today=today_date)
 
     return {
         "total_tasks": total,
         "completed_tasks": completed,
         "active_tasks": active,
         "categories": categories,
+        "current_streak": streak,
         "completion_rate": min(round((completed / total * 100) if total else 0.0, 2), 100.0),
     }
 
@@ -474,14 +476,16 @@ async def history_summary(session: AsyncSession, user: User) -> dict[str, dateti
         alltime_total     = int(stored.alltime_total_tasks or 0)
         alltime_completed = int(stored.alltime_completed_tasks or 0)
         alltime_rate      = float(stored.alltime_completion_rate or 0.0)
-        streak            = int(stored.current_streak or 0)
     else:
         # Stale or missing — recalculate
         stats             = await calculate_and_store_productivity_stats(session, user)
         alltime_total     = stats.alltime_total_tasks
         alltime_completed = stats.alltime_completed_tasks
         alltime_rate      = stats.alltime_completion_rate
-        streak            = stats.current_streak
+
+    # Streak can change immediately after a completion toggle, so compute it
+    # live instead of trusting the stored stats row freshness window.
+    streak = await _calculate_current_streak(session, user.id, today=now.date())
 
     return {
         "started_at": user.created_at,
@@ -662,6 +666,42 @@ def _rate(completed: int, total: int) -> float:
     return min(round((completed / total * 100) if total else 0.0, 2), 100.0)
 
 
+async def _calculate_current_streak(
+    session: AsyncSession,
+    user_id: str,
+    *,
+    today: date | None = None,
+) -> int:
+    """
+    Count consecutive completion days from today backward.
+
+    If the user has not completed anything yet today, we still preserve a live
+    streak that ended yesterday.
+    """
+    completion_date_expr = func.date(TaskCompletion.completed_at)
+    streak_result = await session.execute(
+        select(completion_date_expr)
+        .where(TaskCompletion.user_id == user_id)
+        .group_by(completion_date_expr)
+    )
+    completed_days = {value for value in streak_result.scalars().all() if value}
+
+    if not completed_days:
+        return 0
+
+    cursor = today or datetime.now(timezone.utc).date()
+    streak = 0
+
+    if cursor in completed_days or (cursor - timedelta(days=1)) in completed_days:
+        if cursor not in completed_days:
+            cursor -= timedelta(days=1)
+        while cursor in completed_days:
+            streak += 1
+            cursor -= timedelta(days=1)
+
+    return streak
+
+
 async def calculate_and_store_productivity_stats(
     session: AsyncSession,
     user: User,
@@ -768,22 +808,7 @@ async def calculate_and_store_productivity_stats(
     category_breakdown_json = json.dumps([item.model_dump() for item in category_breakdown])
 
     # ── STEP 4.5: Calculate Streak ──────────────────────────────────────────
-    completion_date_expr = func.date(TaskCompletion.completed_at)
-    streak_result = await session.execute(
-        select(completion_date_expr)
-        .where(TaskCompletion.user_id == user.id)
-        .group_by(completion_date_expr)
-    )
-    completed_days = {value for value in streak_result.scalars().all() if value}
-
-    streak = 0
-    cursor = now.date()
-    if cursor in completed_days or (cursor - timedelta(days=1)) in completed_days:
-        if cursor not in completed_days:
-            cursor -= timedelta(days=1)
-        while cursor in completed_days:
-            streak += 1
-            cursor -= timedelta(days=1)
+    streak = await _calculate_current_streak(session, user.id, today=now.date())
 
     # ── STEP 5: Upsert stored stats row ────────────────────────────────────
     existing = await session.execute(

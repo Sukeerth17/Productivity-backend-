@@ -128,6 +128,7 @@ class DashboardStats(BaseModel):
     completed_tasks: int
     active_tasks: int
     categories: int
+    current_streak: int
     completion_rate: float
 
 
@@ -225,4 +226,3 @@ class ProductivityStatsOut(BaseModel):
     category_breakdown: list[CategoryBreakdownItem] | None = None
     
     updated_at: datetime
-
