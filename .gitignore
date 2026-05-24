@@ -26,3 +26,13 @@ check_trend.py
 recalculate_snapshots.py
 may16_tasks.txt
 scratch/
+add_column.py
+backfill_streak.py
+debug_dash.py
+debug_history.py
+debug_streak.py
+debug_streak_details.py
+debug_task_date.py
+test_history_again.py
+*.db-shm
+*.db-wal
