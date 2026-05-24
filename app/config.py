@@ -13,7 +13,7 @@ class Settings:
     database_url: str = os.getenv("DATABASE_URL", "sqlite+aiosqlite:///./productvity.db")
     allowed_origins: list[str] = [
         origin.strip()
-        for origin in os.getenv("ALLOWED_ORIGINS", "http://localhost:5173,http://127.0.0.1:5173").split(",")
+        for origin in os.getenv("ALLOWED_ORIGINS", "http://localhost:5173,http://127.0.0.1:5173,http://192.168.0.103:5173").split(",")
         if origin.strip()
     ]
     default_page_size: int = int(os.getenv("DEFAULT_PAGE_SIZE", "50"))
