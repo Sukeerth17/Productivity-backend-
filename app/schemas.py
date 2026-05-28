@@ -7,6 +7,7 @@ from pydantic import BaseModel, ConfigDict, EmailStr, Field, field_validator
 
 
 Priority = Literal["low", "medium", "high"]
+HabitFrequency = Literal["daily", "custom_days", "alternative_days"]
 
 
 class CategoryCreate(BaseModel):
@@ -62,6 +63,7 @@ class TaskCreate(BaseModel):
     due_time: str | None = Field(default=None, max_length=12)
     subtasks: list[SubTaskCreate] = Field(default_factory=list)
     start_date: date | None = None
+    habit_frequency: HabitFrequency | None = Field(default=None, description="Habit cadence: daily, custom_days, or alternative_days.")
     habit_days: list[int] | None = Field(default=None, description="Days habit is active: 0=Mon..6=Sun. null=daily.")
 
     @field_validator("due_time")
@@ -83,6 +85,7 @@ class TaskUpdate(BaseModel):
     priority: Priority | None = None
     due_time: str | None = Field(default=None, max_length=12)
     start_date: date | None = None
+    habit_frequency: HabitFrequency | None = Field(default=None, description="Habit cadence: daily, custom_days, or alternative_days.")
     habit_days: list[int] | None = Field(default=None, description="Days habit is active: 0=Mon..6=Sun. null=daily.")
     progress: int | None = Field(default=None, ge=0, le=100)
 
@@ -99,6 +102,7 @@ class TaskOut(BaseModel):
     priority: Priority | None
     due_time: str | None
     start_date: date | None
+    habit_frequency: HabitFrequency
     habit_days: list[int] | None
     progress: int
     created_at: datetime
@@ -110,6 +114,8 @@ class TaskOut(BaseModel):
     @classmethod
     def parse_habit_days(cls, v: Any) -> list[int] | None:
         if v is None or v == "":
+            return None
+        if isinstance(v, str) and v.strip().upper() == "ALT":
             return None
         if isinstance(v, str):
             return [int(d) for d in v.split(",") if d.strip().isdigit()]

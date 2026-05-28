@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from datetime import date, datetime, timedelta, timezone
 import json
+from typing import Literal
 
 from sqlalchemy import Select, and_, case, func, or_, select, update, delete
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -37,13 +38,45 @@ def _habit_days_to_str(days: list[int] | None) -> str | None:
     return ",".join(str(d) for d in sorted(set(days)))
 
 
-def _is_habit_active_today(habit_days_str: str | None) -> bool:
-    """Check if a habit with the given habit_days string is active today."""
-    if not habit_days_str:
+def _is_alternative_days(habit_days_str: str | None) -> bool:
+    return (habit_days_str or "").strip().upper() == "ALT"
+
+
+def _resolve_habit_days(
+    *,
+    is_habit: bool,
+    habit_days: list[int] | None,
+    habit_frequency: Literal["daily", "custom_days", "alternative_days"] | None,
+) -> str | None:
+    if not is_habit:
+        return None
+
+    if habit_frequency == "alternative_days":
+        return "ALT"
+
+    if habit_frequency == "custom_days":
+        normalized_days = _habit_days_to_str(habit_days)
+        if normalized_days is None:
+            raise ValueError("custom_days habits require at least one day")
+        return normalized_days
+
+    return _habit_days_to_str(habit_days)
+
+
+def _is_habit_active_on_date(task: Task, target_date: date) -> bool:
+    if not task.is_habit:
+        return True
+
+    if not task.habit_days:
         return True  # daily
-    today_weekday = datetime.now(timezone.utc).weekday()  # 0=Mon..6=Sun
-    active_days = {int(d) for d in habit_days_str.split(",") if d.strip().isdigit()}
-    return today_weekday in active_days
+
+    if _is_alternative_days(task.habit_days):
+        anchor = task.start_date or task.created_at.date()
+        day_delta = (target_date - anchor).days
+        return day_delta >= 0 and day_delta % 2 == 0
+
+    active_days = {int(d) for d in task.habit_days.split(",") if d.strip().isdigit()}
+    return target_date.weekday() in active_days
 
 
 def _normalize_task_progress(task: Task) -> bool:
@@ -175,7 +208,11 @@ async def create_task(session: AsyncSession, user: User, payload: TaskCreate) ->
         priority=payload.priority,
         due_time=payload.due_time,
         start_date=payload.start_date,
-        habit_days=_habit_days_to_str(payload.habit_days) if payload.is_habit else None,
+        habit_days=_resolve_habit_days(
+            is_habit=payload.is_habit,
+            habit_days=payload.habit_days,
+            habit_frequency=payload.habit_frequency,
+        ),
         progress=100 if payload.completed else 0,
     )
     for idx, sub in enumerate(payload.subtasks):
@@ -221,7 +258,6 @@ async def list_tasks(
     filters = [Task.user_id == user.id, Task.is_deleted.is_(False)]
     now_utc = datetime.now(timezone.utc)
     today = now_utc.date()
-    today_weekday = str(today.weekday())  # 0=Mon..6=Sun
 
     if include_future:
         # Show ONLY tasks whose start_date is strictly in the future
@@ -229,12 +265,6 @@ async def list_tasks(
     else:
         # Default: hide tasks that haven't started yet
         filters.append(or_(Task.start_date.is_(None), Task.start_date <= today))
-        # Only show habits that are active today
-        filters.append(or_(
-            Task.is_habit.is_(False),
-            Task.habit_days.is_(None),
-            Task.habit_days.contains(today_weekday),
-        ))
     if category_id:
         filters.append(Task.category_id == category_id)
     if completed is not None:
@@ -266,17 +296,28 @@ async def list_tasks(
     # Future tasks ordered by start_date asc so soonest appears first
     order_col = Task.start_date.asc() if include_future else Task.created_at.desc()
 
-    tasks_query = (
-        base_query.options(selectinload(Task.subtasks))
-        .order_by(order_col)
-        .limit(limit)
-        .offset(offset)
-    )
+    if include_future:
+        tasks_query = (
+            base_query.options(selectinload(Task.subtasks))
+            .order_by(order_col)
+            .limit(limit)
+            .offset(offset)
+        )
+        tasks_result, total_result = await session.execute(tasks_query), await session.execute(total_query)
+        tasks = list(tasks_result.scalars().unique().all())
+        total = int(total_result.scalar_one())
+    else:
+        tasks_query = (
+            base_query.options(selectinload(Task.subtasks))
+            .order_by(order_col)
+        )
+        tasks_result = await session.execute(tasks_query)
+        all_tasks = list(tasks_result.scalars().unique().all())
+        tasks_for_today = [task for task in all_tasks if _is_habit_active_on_date(task, today)]
+        total = len(tasks_for_today)
+        tasks = tasks_for_today[offset:offset + limit]
 
-    tasks_result, total_result = await session.execute(tasks_query), await session.execute(total_query)
-    tasks = list(tasks_result.scalars().unique().all())
     await _normalize_tasks_progress(session, tasks)
-    total = int(total_result.scalar_one())
     return tasks, total
 
 
@@ -323,8 +364,16 @@ async def update_task(session: AsyncSession, user: User, task: Task, payload: Ta
             )
     if "priority" in data:
         task.priority = data.pop("priority")
-    if "habit_days" in data:
-        task.habit_days = _habit_days_to_str(data.pop("habit_days"))
+    if "habit_days" in data or "habit_frequency" in data or "is_habit" in data:
+        task.habit_days = _resolve_habit_days(
+            is_habit=data.get("is_habit", task.is_habit),
+            habit_days=data.pop("habit_days", None) if "habit_days" in data else (
+                [int(d) for d in task.habit_days.split(",") if d.strip().isdigit()]
+                if task.habit_days and not _is_alternative_days(task.habit_days)
+                else None
+            ),
+            habit_frequency=data.pop("habit_frequency", None),
+        )
         
     for key, value in data.items():
         setattr(task, key, value)
@@ -418,26 +467,27 @@ async def dashboard_stats(session: AsyncSession, user: User) -> dict[str, float 
     now = datetime.now(timezone.utc)
     today_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
     today_date = now.date()
-    today_weekday = str(today_date.weekday())
     
     filters = [
         Task.user_id == user.id,
         Task.is_deleted.is_(False),
         # Exclude tasks that haven't started yet
         or_(Task.start_date.is_(None), Task.start_date <= today_date),
-        # Exclude habits not active today
-        or_(Task.is_habit.is_(False), Task.habit_days.is_(None), Task.habit_days.contains(today_weekday)),
     ]
-    
+
+    tasks_q = await session.execute(select(Task).where(*filters))
+    tasks = list(tasks_q.scalars().all())
+    today_tasks = [task for task in tasks if _is_habit_active_on_date(task, today_date)]
+
     # Active tasks = Pending (incomplete) tasks that are available for today
-    active_q = await session.execute(select(func.count(Task.id)).where(*filters, Task.completed.is_(False)))
-    active = int(active_q.scalar_one())
-    
+    active = sum(1 for task in today_tasks if not task.completed)
+
     # Completed today = Completed and completed_at is today
-    completed_today_q = await session.execute(
-        select(func.count(Task.id)).where(*filters, Task.completed.is_(True), Task.completed_at >= today_start)
+    completed = sum(
+        1
+        for task in today_tasks
+        if task.completed and task.completed_at and task.completed_at >= today_start
     )
-    completed = int(completed_today_q.scalar_one())
     
     # Total for today = Pending (active) + Completed Today
     total = active + completed

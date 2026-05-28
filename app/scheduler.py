@@ -1,14 +1,27 @@
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
-from sqlalchemy import and_, delete, func, select, or_, not_
+from sqlalchemy import and_, delete, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import sessionmaker, selectinload
 
 from .database import engine
 from .models import DailySnapshot, Task, TaskCompletion, User
+
+
+def _is_habit_active_on_date(task: Task, target_date: date) -> bool:
+    if not task.habit_days:
+        return True
+
+    if task.habit_days.strip().upper() == "ALT":
+        anchor = task.start_date or task.created_at.date()
+        day_delta = (target_date - anchor).days
+        return day_delta >= 0 and day_delta % 2 == 0
+
+    active_days = {int(d) for d in task.habit_days.split(",") if d.strip().isdigit()}
+    return target_date.weekday() in active_days
 
 
 async def _write_daily_snapshots() -> None:
@@ -42,7 +55,6 @@ async def _write_daily_snapshots() -> None:
                     cursor += timedelta(days=1)
                     continue
 
-                today_weekday = str(cursor.date().weekday())
                 next_day_start = cursor + timedelta(days=1)
                 
                 # 1. Count completions from ledger
@@ -70,18 +82,17 @@ async def _write_daily_snapshots() -> None:
                 pending_oneoffs = int((await session.execute(pending_oneoff_q)).scalar_one() or 0)
 
                 # 3. Count pending habits (active today but not completed today)
-                # Fetch task ids of habits completed on this cursor day
-                habit_comp_subq = (
-                    select(TaskCompletion.task_id)
-                    .where(
+                completed_habit_ids_result = await session.execute(
+                    select(TaskCompletion.task_id).where(
                         TaskCompletion.user_id == user.id,
                         TaskCompletion.completed_at >= cursor,
                         TaskCompletion.completed_at < next_day_start,
-                        TaskCompletion.task_id.is_not(None)
+                        TaskCompletion.task_id.is_not(None),
                     )
-                ).subquery()
+                )
+                completed_habit_ids = {task_id for task_id in completed_habit_ids_result.scalars().all() if task_id}
 
-                pending_habit_q = select(func.count(Task.id)).where(
+                pending_habit_q = select(Task).where(
                     Task.user_id == user.id,
                     Task.is_habit.is_(True),
                     Task.created_at < next_day_start,
@@ -89,14 +100,14 @@ async def _write_daily_snapshots() -> None:
                         Task.is_deleted.is_(False),
                         and_(Task.is_deleted.is_(True), Task.deleted_at >= next_day_start)
                     ),
-                    or_(
-                        Task.habit_days.is_(None),
-                        Task.habit_days.contains(today_weekday)
-                    ),
                     or_(Task.start_date.is_(None), Task.start_date <= cursor.date()),
-                    not_(Task.id.in_(select(habit_comp_subq.c.task_id)))
                 )
-                pending_habits = int((await session.execute(pending_habit_q)).scalar_one() or 0)
+                pending_habits_result = await session.execute(pending_habit_q)
+                pending_habits = sum(
+                    1
+                    for task in pending_habits_result.scalars().all()
+                    if _is_habit_active_on_date(task, cursor.date()) and task.id not in completed_habit_ids
+                )
 
                 total_available = total_completed + pending_oneoffs + pending_habits
 
@@ -141,8 +152,6 @@ async def reset_habit_tasks() -> None:
     async with async_session() as session:
         now_utc = datetime.now(timezone.utc)
         today_start = now_utc.replace(hour=0, minute=0, second=0, microsecond=0)
-        today_weekday = now_utc.weekday()  # 0=Mon..6=Sun
-
         # Get all completed habit tasks that were completed BEFORE today.
         # This makes the reset idempotent; if it runs multiple times today,
         # it won't reset tasks the user has already completed TODAY.
@@ -165,13 +174,11 @@ async def reset_habit_tasks() -> None:
         reset_count = 0
         for task in tasks:
             # Check if habit is active today (the new day)
-            if task.habit_days:
-                active_days = {int(d) for d in task.habit_days.split(",") if d.strip().isdigit()}
-                if today_weekday not in active_days:
-                    # Skip reset if it's not active today. 
-                    # This means it will stay 'completed' from yesterday until its next active day.
-                    # This is correct because the frontend filters out habits not active today anyway.
-                    continue 
+            if not _is_habit_active_on_date(task, now_utc.date()):
+                # Skip reset if it's not active today.
+                # This means it will stay 'completed' from yesterday until its next active day.
+                # This is correct because the frontend filters out habits not active today anyway.
+                continue
 
             # Reset the task
             task.completed = False

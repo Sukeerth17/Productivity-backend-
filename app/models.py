@@ -134,6 +134,14 @@ class Task(Base):
         passive_deletes=True,
     )
 
+    @property
+    def habit_frequency(self) -> str:
+        if not self.habit_days:
+            return "daily"
+        if self.habit_days.strip().upper() == "ALT":
+            return "alternative_days"
+        return "custom_days"
+
 
 class SubTask(Base):
     __tablename__ = "subtasks"
